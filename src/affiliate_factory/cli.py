@@ -435,7 +435,11 @@ def cmd_performance_record(args: argparse.Namespace) -> int:
         rec_id = f"perf_{clean_cid}_{clean_plat}_{ts_slug}_{uuid.uuid4().hex[:6]}"
 
     # 7. Persist to SQLite
-    db.save_performance_record(rec_id, record)
+    try:
+        db.save_performance_record(rec_id, record)
+    except ValueError as e:
+        print(f"[ERROR] Gagal menyimpan snapshot: {e}", file=sys.stderr)
+        return 1
 
     # 8. Record audit event
     db.append_event(
@@ -571,29 +575,37 @@ def cmd_performance_summary(args: argparse.Namespace) -> int:
     print(f"Total Snapshot    : {summary.total_snapshots}")
 
     views_str = f"{summary.total_views:,}" if summary.total_views is not None else "Tidak diketahui"
-    if summary.views_unknown_count > 0:
+    if summary.views_unknown_count > 0 and summary.total_views is not None:
+        views_str += f" [PARSIAL: {summary.views_unknown_count} dari {summary.total_content_items} konten tidak mencatat tayangan; bukan total lengkap]"
+    elif summary.views_unknown_count > 0:
         views_str += f" ({summary.views_unknown_count} konten tidak mencatat tayangan)"
     print(f"Total Tayangan    : {views_str}")
 
     clicks_str = f"{summary.total_clicks:,}" if summary.total_clicks is not None else "Tidak diketahui"
-    if summary.clicks_unknown_count > 0:
+    if summary.clicks_unknown_count > 0 and summary.total_clicks is not None:
+        clicks_str += f" [PARSIAL: {summary.clicks_unknown_count} dari {summary.total_content_items} konten tidak mencatat klik; bukan total lengkap]"
+    elif summary.clicks_unknown_count > 0:
         clicks_str += f" ({summary.clicks_unknown_count} konten tidak mencatat klik)"
     print(f"Total Klik        : {clicks_str}")
 
     orders_str = f"{summary.total_orders:,}" if summary.total_orders is not None else "Tidak diketahui"
-    if summary.orders_unknown_count > 0:
+    if summary.orders_unknown_count > 0 and summary.total_orders is not None:
+        orders_str += f" [PARSIAL: {summary.orders_unknown_count} dari {summary.total_content_items} konten tidak mencatat pesanan; bukan total lengkap]"
+    elif summary.orders_unknown_count > 0:
         orders_str += f" ({summary.orders_unknown_count} konten tidak mencatat pesanan)"
     print(f"Total Pesanan     : {orders_str}")
 
     comm_str = f"Rp {summary.total_commission_idr:,.0f}" if summary.total_commission_idr is not None else "Tidak diketahui"
-    if summary.commission_unknown_count > 0:
+    if summary.commission_unknown_count > 0 and summary.total_commission_idr is not None:
+        comm_str += f" [PARSIAL: {summary.commission_unknown_count} dari {summary.total_content_items} konten tidak mencatat komisi; bukan total lengkap]"
+    elif summary.commission_unknown_count > 0:
         comm_str += f" ({summary.commission_unknown_count} konten tidak mencatat komisi)"
     print(f"Total Komisi (IDR): {comm_str}")
 
-    ctr_str = f"{summary.aggregate_rates.ctr:.2f}%" if summary.aggregate_rates.ctr is not None else "N/A"
+    ctr_str = f"{summary.aggregate_rates.ctr:.2f}% (dihitung dari {summary.ctr_cohort_count} konten dengan data tayangan & klik lengkap)" if summary.aggregate_rates.ctr is not None else "N/A"
     print(f"CTR Keseluruhan   : {ctr_str}")
 
-    co_str = f"{summary.aggregate_rates.click_to_order:.2f}%" if summary.aggregate_rates.click_to_order is not None else "N/A"
+    co_str = f"{summary.aggregate_rates.click_to_order:.2f}% (dihitung dari {summary.cr_cohort_count} konten dengan data klik & pesanan lengkap)" if summary.aggregate_rates.click_to_order is not None else "N/A"
     print(f"Click-to-Order CR : {co_str}")
 
     cpo_str = f"Rp {summary.aggregate_rates.commission_per_order:,.0f}" if summary.aggregate_rates.commission_per_order is not None else "N/A"
@@ -629,6 +641,90 @@ def cmd_performance_summary(args: argparse.Namespace) -> int:
 
     print("\n> CATATAN: Korelasi metrik tidak membuktikan kausalitas langsung.")
     print("> Data bersumber manual dicatat sesuai laporan pengguna tanpa verifikasi server Shopee.")
+    return 0
+
+
+def cmd_performance_correct(args: argparse.Namespace) -> int:
+    """Explicitly correct an existing performance record snapshot."""
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = Database(db_path)
+
+    existing = db.get_performance_record(args.record_id.strip())
+    if not existing:
+        print(
+            f"[ERROR] Snapshot performa dengan ID '{args.record_id}' tidak ditemukan di database.",
+            file=sys.stderr,
+        )
+        return 1
+
+    new_views = args.views if args.views is not None else existing.views
+    new_clicks = args.clicks if args.clicks is not None else existing.clicks
+    new_orders = args.orders if args.orders is not None else existing.orders
+    new_commission = args.commission if args.commission is not None else existing.commission_idr
+    new_source = args.source if args.source is not None else existing.data_source
+
+    anomalies = check_metric_anomalies(views=new_views, clicks=new_clicks, orders=new_orders)
+    for w in anomalies:
+        print(f"[PERINGATAN ANOMALI] {w}")
+
+    try:
+        updated_record = PerformanceRecord(
+            id=existing.id,
+            content_id=existing.content_id,
+            platform=existing.platform,
+            observed_at=existing.observed_at,
+            views=new_views,
+            clicks=new_clicks,
+            orders=new_orders,
+            commission_idr=new_commission,
+            data_source=new_source,
+        )
+    except Exception as e:
+        print(f"[VALIDATION_ERROR] Validasi data koreksi gagal: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        db.save_performance_record(existing.id, updated_record, allow_overwrite=True)
+    except Exception as e:
+        print(f"[ERROR] Gagal memperbarui snapshot: {e}", file=sys.stderr)
+        return 1
+
+    db.append_event(
+        Event(
+            id=str(uuid.uuid4()),
+            ts=datetime.now(timezone.utc),
+            run_id=str(uuid.uuid4()),
+            module="performance",
+            action="correct_snapshot",
+            status="succeeded",
+            ref_type="content_id",
+            ref_id=existing.content_id,
+            note=(
+                f"Corrected snapshot {existing.id} for content '{existing.content_id}': "
+                f"views={new_views}, clicks={new_clicks}, orders={new_orders}, "
+                f"commission_idr={new_commission}. Reason: {args.note or 'Correction'}"
+            ),
+        )
+    )
+
+    rates = calculate_conversion_rates(
+        views=new_views,
+        clicks=new_clicks,
+        orders=new_orders,
+        commission_idr=new_commission,
+    )
+
+    print("\n[SUKSES] Snapshot performa berhasil dikoreksi.")
+    print(f"Snapshot ID  : {existing.id}")
+    print(f"Content ID   : {updated_record.content_id}")
+    print(f"Platform     : {updated_record.platform}")
+    print(f"Observed At  : {updated_record.observed_at.isoformat()}")
+    print(f"Views        : {updated_record.views if updated_record.views is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"Clicks       : {updated_record.clicks if updated_record.clicks is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"Orders       : {updated_record.orders if updated_record.orders is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"Komisi (IDR) : {f'Rp {updated_record.commission_idr:,.0f}' if updated_record.commission_idr is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"CTR          : {f'{rates.ctr:.2f}%' if rates.ctr is not None else 'N/A'}")
+    print(f"Click-to-Ord : {f'{rates.click_to_order:.2f}%' if rates.click_to_order is not None else 'N/A'}")
     return 0
 
 
@@ -750,6 +846,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_summary.add_argument("--end-date", help="Batas akhir rentang observasi ISO-8601 (opsional).")
     p_summary.add_argument("--db", help="Path ke SQLite database.")
     p_summary.set_defaults(func=cmd_performance_summary)
+
+    # 7d. performance correct
+    p_correct = perf_subparsers.add_parser("correct", help="Koreksi snapshot performa yang sudah ada secara eksplisit.")
+    p_correct.add_argument("--record-id", required=True, help="ID snapshot yang ingin dikoreksi.")
+    p_correct.add_argument("--views", type=int, help="Nilai koreksi tayangan (views).")
+    p_correct.add_argument("--clicks", type=int, help="Nilai koreksi klik afiliasi.")
+    p_correct.add_argument("--orders", type=int, help="Nilai koreksi pesanan afiliasi.")
+    p_correct.add_argument("--commission", type=float, help="Nilai koreksi komisi afiliasi (IDR).")
+    p_correct.add_argument("--source", choices=["manual", "official_api"], help="Sumber data yang diperbarui.")
+    p_correct.add_argument("--note", help="Alasan koreksi snapshot.")
+    p_correct.add_argument("--db", help="Path ke SQLite database.")
+    p_correct.set_defaults(func=cmd_performance_correct)
 
     return parser
 

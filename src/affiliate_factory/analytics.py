@@ -134,17 +134,24 @@ class PerformanceSummary:
     """
     total_content_items: int
     total_snapshots: int
-    # Sum of latest metrics across items
+    # Sum of latest metrics across items (None if all items in cohort are unknown)
     total_views: int | None
     total_clicks: int | None
     total_orders: int | None
     total_commission_idr: float | None
-    # Counts of items where metric was unknown (None)
+    # Counts of items where metric was known / unknown
+    views_known_count: int
     views_unknown_count: int
+    clicks_known_count: int
     clicks_unknown_count: int
+    orders_known_count: int
     orders_unknown_count: int
+    commission_known_count: int
     commission_unknown_count: int
-    # Overall factory conversion rates
+    # Cohort count for aggregate conversion ratios
+    ctr_cohort_count: int
+    cr_cohort_count: int
+    # Overall factory conversion rates (computed strictly on matching known cohorts)
     aggregate_rates: ConversionRates
     # Per-content breakdown
     items: list[ContentPerformanceItem] = field(default_factory=list)
@@ -154,7 +161,13 @@ def calculate_performance_summary(records: list[PerformanceRecord]) -> Performan
     """Aggregate a collection of performance snapshots without double-counting.
 
     Groups snapshots by (content_id, platform). For each content item, takes the latest
-    snapshot as its current cumulative state. Sums latest states across distinct items.
+    snapshot as its current cumulative state within the query window.
+
+    Invariants:
+    1. Does NOT sum multiple snapshots of the same content (cumulative counters).
+    2. Does NOT substitute None with 0.
+    3. Aggregate CTR is calculated strictly from content items where BOTH views and clicks are known.
+    4. Aggregate Click-to-Order is calculated strictly from content items where BOTH clicks and orders are known.
     """
     if not records:
         return PerformanceSummary(
@@ -164,10 +177,16 @@ def calculate_performance_summary(records: list[PerformanceRecord]) -> Performan
             total_clicks=None,
             total_orders=None,
             total_commission_idr=None,
+            views_known_count=0,
             views_unknown_count=0,
+            clicks_known_count=0,
             clicks_unknown_count=0,
+            orders_known_count=0,
             orders_unknown_count=0,
+            commission_known_count=0,
             commission_unknown_count=0,
+            ctr_cohort_count=0,
+            cr_cohort_count=0,
             aggregate_rates=ConversionRates(),
             items=[],
         )
@@ -181,28 +200,28 @@ def calculate_performance_summary(records: list[PerformanceRecord]) -> Performan
     content_items: list[ContentPerformanceItem] = []
 
     sum_views = 0
-    any_views_known = False
+    views_known_count = 0
     views_unknown_count = 0
 
     sum_clicks = 0
-    any_clicks_known = False
+    clicks_known_count = 0
     clicks_unknown_count = 0
 
     sum_orders = 0
-    any_orders_known = False
+    orders_known_count = 0
     orders_unknown_count = 0
 
     sum_commission = 0.0
-    any_commission_known = False
+    commission_known_count = 0
     commission_unknown_count = 0
 
     for (c_id, plat), group_recs in groups.items():
-        # Sort chronologically
+        # Sort chronologically with deterministic tie-breaking by id
         sorted_recs = sorted(group_recs, key=lambda x: (x.observed_at, x.id or ""))
         first_rec = sorted_recs[0]
         latest_rec = sorted_recs[-1]
 
-        # Calculate deltas if multiple snapshots exist
+        # Calculate deltas if multiple snapshots exist in window
         v_delta: int | None = None
         c_delta: int | None = None
         o_delta: int | None = None
@@ -248,38 +267,92 @@ def calculate_performance_summary(records: list[PerformanceRecord]) -> Performan
         # Aggregate metrics from latest snapshot
         if latest_rec.views is not None:
             sum_views += latest_rec.views
-            any_views_known = True
+            views_known_count += 1
         else:
             views_unknown_count += 1
 
         if latest_rec.clicks is not None:
             sum_clicks += latest_rec.clicks
-            any_clicks_known = True
+            clicks_known_count += 1
         else:
             clicks_unknown_count += 1
 
         if latest_rec.orders is not None:
             sum_orders += latest_rec.orders
-            any_orders_known = True
+            orders_known_count += 1
         else:
             orders_unknown_count += 1
 
         if latest_rec.commission_idr is not None:
             sum_commission += latest_rec.commission_idr
-            any_commission_known = True
+            commission_known_count += 1
         else:
             commission_unknown_count += 1
 
-    total_views = sum_views if any_views_known else None
-    total_clicks = sum_clicks if any_clicks_known else None
-    total_orders = sum_orders if any_orders_known else None
-    total_commission = sum_commission if any_commission_known else None
+    total_views = sum_views if views_known_count > 0 else None
+    total_clicks = sum_clicks if clicks_known_count > 0 else None
+    total_orders = sum_orders if orders_known_count > 0 else None
+    total_commission = sum_commission if commission_known_count > 0 else None
 
-    aggregate_rates = calculate_conversion_rates(
-        views=total_views,
-        clicks=total_clicks,
-        orders=total_orders,
-        commission_idr=total_commission,
+    # Strict cohort-based conversion ratios:
+    # Only items where BOTH numerator and denominator are known are included
+    ctr_views_cohort = 0
+    ctr_clicks_cohort = 0
+    ctr_cohort_count = 0
+    for item in content_items:
+        if item.views is not None and item.clicks is not None:
+            ctr_views_cohort += item.views
+            ctr_clicks_cohort += item.clicks
+            ctr_cohort_count += 1
+
+    aggregate_ctr: float | None = None
+    if ctr_cohort_count > 0 and ctr_views_cohort > 0:
+        aggregate_ctr = (ctr_clicks_cohort / ctr_views_cohort) * 100.0
+
+    cr_clicks_cohort = 0
+    cr_orders_cohort = 0
+    cr_cohort_count = 0
+    for item in content_items:
+        if item.clicks is not None and item.orders is not None:
+            cr_clicks_cohort += item.clicks
+            cr_orders_cohort += item.orders
+            cr_cohort_count += 1
+
+    aggregate_click_to_order: float | None = None
+    if cr_cohort_count > 0 and cr_clicks_cohort > 0:
+        aggregate_click_to_order = (cr_orders_cohort / cr_clicks_cohort) * 100.0
+
+    cpo_orders_cohort = 0
+    cpo_commission_cohort = 0.0
+    cpo_cohort_count = 0
+    for item in content_items:
+        if item.orders is not None and item.commission_idr is not None:
+            cpo_orders_cohort += item.orders
+            cpo_commission_cohort += item.commission_idr
+            cpo_cohort_count += 1
+
+    aggregate_cpo: float | None = None
+    if cpo_cohort_count > 0 and cpo_orders_cohort > 0:
+        aggregate_cpo = cpo_commission_cohort / cpo_orders_cohort
+
+    cpc_clicks_cohort = 0
+    cpc_commission_cohort = 0.0
+    cpc_cohort_count = 0
+    for item in content_items:
+        if item.clicks is not None and item.commission_idr is not None:
+            cpc_clicks_cohort += item.clicks
+            cpc_commission_cohort += item.commission_idr
+            cpc_cohort_count += 1
+
+    aggregate_cpc: float | None = None
+    if cpc_cohort_count > 0 and cpc_clicks_cohort > 0:
+        aggregate_cpc = cpc_commission_cohort / cpc_clicks_cohort
+
+    aggregate_rates = ConversionRates(
+        ctr=aggregate_ctr,
+        click_to_order=aggregate_click_to_order,
+        commission_per_order=aggregate_cpo,
+        commission_per_click=aggregate_cpc,
     )
 
     return PerformanceSummary(
@@ -289,10 +362,16 @@ def calculate_performance_summary(records: list[PerformanceRecord]) -> Performan
         total_clicks=total_clicks,
         total_orders=total_orders,
         total_commission_idr=total_commission,
+        views_known_count=views_known_count,
         views_unknown_count=views_unknown_count,
+        clicks_known_count=clicks_known_count,
         clicks_unknown_count=clicks_unknown_count,
+        orders_known_count=orders_known_count,
         orders_unknown_count=orders_unknown_count,
+        commission_known_count=commission_known_count,
         commission_unknown_count=commission_unknown_count,
+        ctr_cohort_count=ctr_cohort_count,
+        cr_cohort_count=cr_cohort_count,
         aggregate_rates=aggregate_rates,
         items=content_items,
     )

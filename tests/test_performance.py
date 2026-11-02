@@ -277,15 +277,19 @@ class TestPerformanceTracking(unittest.TestCase):
         self.assertIn("rec_2", ids)
         self.assertIn("rec_3", ids)
 
-    # 9. Duplicate snapshot ID handling (updates existing snapshot explicitly)
+    # 9. Duplicate snapshot ID handling: raises ValueError unless allow_overwrite=True
     def test_duplicate_record_id_handling(self) -> None:
         r1 = PerformanceRecord(content_id="post_dup", platform="Shopee Video", views=100, clicks=5)
         self.db.save_performance_record("snap_unique_id", r1)
 
-        # Update with new metric values under same ID
+        # By default, duplicate snapshot ID must be rejected to protect historical immutability
         r2 = PerformanceRecord(content_id="post_dup", platform="Shopee Video", views=150, clicks=8)
-        self.db.save_performance_record("snap_unique_id", r2)
+        with self.assertRaises(ValueError) as ctx:
+            self.db.save_performance_record("snap_unique_id", r2)
+        self.assertIn("sudah ada di database", str(ctx.exception))
 
+        # Explicit correction with allow_overwrite=True succeeds
+        self.db.save_performance_record("snap_unique_id", r2, allow_overwrite=True)
         history = self.db.list_performance_records(content_id="post_dup")
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].views, 150)
@@ -404,6 +408,243 @@ class TestPerformanceTracking(unittest.TestCase):
         ])
         self.assertEqual(code_bad_summary_date, 1)
 
+
+
+    # 12. Non-finite commission values rejected (NaN, Inf, -Inf)
+    def test_non_finite_commission_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            PerformanceRecord(content_id="d1", platform="p1", commission_idr=float("nan"))
+        with self.assertRaises(ValueError):
+            PerformanceRecord(content_id="d1", platform="p1", commission_idr=float("inf"))
+        with self.assertRaises(ValueError):
+            PerformanceRecord(content_id="d1", platform="p1", commission_idr=float("-inf"))
+
+    # 13. Timezone normalization: naive or aware timestamps normalized to UTC
+    def test_timezone_normalization(self) -> None:
+        from datetime import timezone as dt_tz, timedelta
+
+        # Naive datetime gets UTC timezone attached
+        naive_dt = datetime(2026, 11, 2, 8, 30, 0)
+        r_naive = PerformanceRecord(content_id="d1", platform="p1", observed_at=naive_dt)
+        self.assertIsNotNone(r_naive.observed_at.tzinfo)
+        self.assertEqual(r_naive.observed_at.tzinfo, dt_tz.utc)
+        self.assertEqual(r_naive.observed_at.hour, 8)
+
+        # Aware datetime (e.g. WIB = UTC+7) is normalized to UTC
+        tz_wib = dt_tz(timedelta(hours=7))
+        wib_dt = datetime(2026, 11, 2, 17, 0, 0, tzinfo=tz_wib)
+        r_wib = PerformanceRecord(content_id="d1", platform="p1", observed_at=wib_dt)
+        self.assertEqual(r_wib.observed_at.tzinfo, dt_tz.utc)
+        self.assertEqual(r_wib.observed_at.hour, 10)  # 17:00 UTC+7 is 10:00 UTC
+
+    # 14. Identical timestamps resolved with deterministic tie-breaking (id ASC)
+    def test_identical_timestamps_deterministic_tiebreak(self) -> None:
+        t_same = datetime(2026, 11, 2, 12, 0, 0, tzinfo=timezone.utc)
+        # Insert snap_b then snap_a with identical observed_at
+        self.db.save_performance_record("snap_b", PerformanceRecord(content_id="post_same", platform="Shopee Video", observed_at=t_same, views=200))
+        self.db.save_performance_record("snap_a", PerformanceRecord(content_id="post_same", platform="Shopee Video", observed_at=t_same, views=100))
+
+        records = self.db.list_performance_records(content_id="post_same")
+        self.assertEqual(len(records), 2)
+        # Deterministic order: observed_at ASC, id ASC -> snap_a comes first, snap_b comes second
+        self.assertEqual(records[0].id, "snap_a")
+        self.assertEqual(records[1].id, "snap_b")
+
+        # In summary, latest snapshot selected is snap_b (views=200)
+        summary = calculate_performance_summary(records)
+        self.assertEqual(summary.total_views, 200)
+
+    # 15. Conversion rates calculated strictly over cohorts where both metrics are known
+    def test_cohort_conversion_rates_partial_unknown(self) -> None:
+        t0 = datetime(2026, 11, 2, 12, 0, 0, tzinfo=timezone.utc)
+        # Item 1: Views=1000, Clicks=50, Orders=None (known views & clicks)
+        r1 = PerformanceRecord(content_id="item_1", platform="Shopee Video", observed_at=t0, views=1000, clicks=50, orders=None)
+        # Item 2: Views=None, Clicks=20, Orders=2 (known clicks & orders)
+        r2 = PerformanceRecord(content_id="item_2", platform="Shopee Video", observed_at=t0, views=None, clicks=20, orders=2)
+
+        summary = calculate_performance_summary([r1, r2])
+
+        # Totals
+        self.assertEqual(summary.total_views, 1000)
+        self.assertEqual(summary.views_known_count, 1)
+        self.assertEqual(summary.views_unknown_count, 1)
+
+        self.assertEqual(summary.total_clicks, 70)
+        self.assertEqual(summary.clicks_known_count, 2)
+        self.assertEqual(summary.clicks_unknown_count, 0)
+
+        self.assertEqual(summary.total_orders, 2)
+        self.assertEqual(summary.orders_known_count, 1)
+        self.assertEqual(summary.orders_unknown_count, 1)
+
+        # Strict CTR cohort: Only item_1 has BOTH views and clicks known!
+        # CTR must be 50 / 1000 = 5.0%, NOT (50 + 20) / 1000 = 7.0%!
+        self.assertEqual(summary.ctr_cohort_count, 1)
+        self.assertEqual(summary.aggregate_rates.ctr, 5.0)
+
+        # Strict Click-to-Order cohort: Only item_2 has BOTH clicks and orders known!
+        # Click-to-Order must be 2 / 20 = 10.0%, NOT 2 / (50 + 20) = 2.857%!
+        self.assertEqual(summary.cr_cohort_count, 1)
+        self.assertEqual(summary.aggregate_rates.click_to_order, 10.0)
+
+    # 16. All metrics unknown (None) across all items
+    def test_all_metrics_unknown(self) -> None:
+        t0 = datetime(2026, 11, 2, 12, 0, 0, tzinfo=timezone.utc)
+        r = PerformanceRecord(content_id="item_none", platform="Shopee Video", observed_at=t0)
+        summary = calculate_performance_summary([r])
+
+        self.assertIsNone(summary.total_views)
+        self.assertIsNone(summary.total_clicks)
+        self.assertIsNone(summary.total_orders)
+        self.assertIsNone(summary.total_commission_idr)
+        self.assertEqual(summary.views_unknown_count, 1)
+        self.assertEqual(summary.clicks_unknown_count, 1)
+        self.assertIsNone(summary.aggregate_rates.ctr)
+        self.assertIsNone(summary.aggregate_rates.click_to_order)
+
+    # 17. Recorded true zeros (0 vs None)
+    def test_recorded_true_zeros(self) -> None:
+        t0 = datetime(2026, 11, 2, 12, 0, 0, tzinfo=timezone.utc)
+        r = PerformanceRecord(
+            content_id="item_zero",
+            platform="Shopee Video",
+            observed_at=t0,
+            views=500,
+            clicks=0,
+            orders=0,
+            commission_idr=0.0,
+        )
+        summary = calculate_performance_summary([r])
+
+        self.assertEqual(summary.total_views, 500)
+        self.assertEqual(summary.total_clicks, 0)
+        self.assertEqual(summary.total_orders, 0)
+        self.assertEqual(summary.total_commission_idr, 0.0)
+        self.assertEqual(summary.clicks_known_count, 1)
+        self.assertEqual(summary.clicks_unknown_count, 0)
+        # CTR: 0 / 500 = 0.0%
+        self.assertEqual(summary.aggregate_rates.ctr, 0.0)
+        # Click-to-Order: 0 / 0 -> None (zero denominator)
+        self.assertIsNone(summary.aggregate_rates.click_to_order)
+
+    # 18. Date filtering excludes out-of-range snapshots
+    def test_summary_date_filtering_excludes_out_of_range(self) -> None:
+        t1 = datetime(2026, 11, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 11, 5, 10, 0, 0, tzinfo=timezone.utc)
+
+        self.db.save_performance_record("snap_early", PerformanceRecord(content_id="post_filter", platform="Shopee Video", observed_at=t1, views=100))
+        self.db.save_performance_record("snap_late", PerformanceRecord(content_id="post_filter", platform="Shopee Video", observed_at=t2, views=400))
+
+        # Query only on or after Nov 3
+        t_start = datetime(2026, 11, 3, 0, 0, 0, tzinfo=timezone.utc)
+        records = self.db.list_performance_records(content_id="post_filter", start_date=t_start)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].id, "snap_late")
+        self.assertEqual(records[0].views, 400)
+
+    # 19. Summary period deltas calculated across snapshots in window
+    def test_summary_period_delta(self) -> None:
+        t1 = datetime(2026, 11, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 11, 4, 10, 0, 0, tzinfo=timezone.utc)
+
+        r1 = PerformanceRecord(content_id="post_delta", platform="Shopee Video", observed_at=t1, views=100, clicks=10, orders=1, commission_idr=5000.0)
+        r2 = PerformanceRecord(content_id="post_delta", platform="Shopee Video", observed_at=t2, views=350, clicks=35, orders=4, commission_idr=20000.0)
+
+        summary = calculate_performance_summary([r1, r2])
+        self.assertEqual(len(summary.items), 1)
+        item = summary.items[0]
+        self.assertEqual(item.views_delta, 250)
+        self.assertEqual(item.clicks_delta, 25)
+        self.assertEqual(item.orders_delta, 3)
+        self.assertEqual(item.commission_delta, 15000.0)
+
+    # 20. CLI performance correct smoke test
+    def test_cli_performance_correct_smoke(self) -> None:
+        # First record a snapshot
+        code_rec = main([
+            "performance",
+            "record",
+            "--content-id",
+            "draft_perf_01",
+            "--platform",
+            "Shopee Video",
+            "--views",
+            "500",
+            "--record-id",
+            "snap_to_correct",
+            "--db",
+            str(self.db_path),
+        ])
+        self.assertEqual(code_rec, 0)
+
+        # Now correct it using CLI correct
+        code_corr = main([
+            "performance",
+            "correct",
+            "--record-id",
+            "snap_to_correct",
+            "--views",
+            "600",
+            "--clicks",
+            "25",
+            "--note",
+            "Typo correction in manual record",
+            "--db",
+            str(self.db_path),
+        ])
+        self.assertEqual(code_corr, 0)
+
+        # Verify database record updated
+        updated = self.db.get_performance_record("snap_to_correct")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.views, 600)
+        self.assertEqual(updated.clicks, 25)
+
+        # Verify audit event logged with action="correct_snapshot"
+        events = self.db.list_events()
+        corr_events = [e for e in events if e.module == "performance" and e.action == "correct_snapshot"]
+        self.assertEqual(len(corr_events), 1)
+        self.assertIn("snap_to_correct", corr_events[0].note)
+
+    # 21. CLI duplicate record ID fails with non-zero exit code and emits NO audit event
+    def test_cli_duplicate_record_id_fails_without_audit_event(self) -> None:
+        code1 = main([
+            "performance",
+            "record",
+            "--content-id",
+            "draft_perf_01",
+            "--platform",
+            "Shopee Video",
+            "--views",
+            "500",
+            "--record-id",
+            "fixed_id_001",
+            "--db",
+            str(self.db_path),
+        ])
+        self.assertEqual(code1, 0)
+        events_before = len([e for e in self.db.list_events() if e.module == "performance"])
+
+        # Attempt to record again with same ID without correct command
+        code2 = main([
+            "performance",
+            "record",
+            "--content-id",
+            "draft_perf_01",
+            "--platform",
+            "Shopee Video",
+            "--views",
+            "800",
+            "--record-id",
+            "fixed_id_001",
+            "--db",
+            str(self.db_path),
+        ])
+        self.assertEqual(code2, 1)
+
+        # No new audit event should have been logged for the failed record
+        events_after = len([e for e in self.db.list_events() if e.module == "performance"])
+        self.assertEqual(events_before, events_after)
 
 if __name__ == "__main__":
     unittest.main()

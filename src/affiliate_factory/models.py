@@ -6,6 +6,7 @@ claims, compliance, performance recording, and event logging.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -111,11 +112,21 @@ class PerformanceRecord(BaseModel):
             raise ValueError(f"{info.field_name.capitalize()} must be non-negative")
         return v
 
+    @field_validator("observed_at")
+    @classmethod
+    def validate_and_normalize_utc(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
+
     @field_validator("commission_idr")
     @classmethod
     def validate_non_negative_commission(cls, v: float | None) -> float | None:
-        if v is not None and v < 0:
-            raise ValueError("Commission must be non-negative")
+        if v is not None:
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError("Commission must be a finite number, not NaN or Infinity")
+            if v < 0:
+                raise ValueError("Commission must be non-negative")
         return v
 
     @field_validator("content_id", "platform")

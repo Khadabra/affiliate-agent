@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -483,12 +483,14 @@ class Database:
         self,
         record_id: str | PerformanceRecord,
         record: PerformanceRecord | None = None,
+        allow_overwrite: bool = False,
     ) -> str:
         """Save a performance record snapshot.
 
-        Supports both positional signatures:
-        - save_performance_record(record_id, record)
-        - save_performance_record(record)
+        Invariants:
+        - By default (allow_overwrite=False), duplicate snapshot IDs are strictly
+          rejected with ValueError to protect historical snapshot immutability.
+        - If allow_overwrite=True, explicitly updates an existing snapshot.
         """
         import uuid
         if isinstance(record_id, PerformanceRecord):
@@ -504,33 +506,59 @@ class Database:
         conn = self.get_connection()
         try:
             with conn:
-                conn.execute(
-                    """
-                    INSERT INTO performance_records (
-                        id, content_id, platform, observed_at, views, clicks, orders, commission_idr, data_source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        content_id=excluded.content_id,
-                        platform=excluded.platform,
-                        observed_at=excluded.observed_at,
-                        views=excluded.views,
-                        clicks=excluded.clicks,
-                        orders=excluded.orders,
-                        commission_idr=excluded.commission_idr,
-                        data_source=excluded.data_source
-                    """,
-                    (
-                        rec_id,
-                        rec.content_id,
-                        rec.platform,
-                        rec.observed_at.isoformat(),
-                        rec.views,
-                        rec.clicks,
-                        rec.orders,
-                        rec.commission_idr,
-                        rec.data_source,
-                    ),
-                )
+                if not allow_overwrite:
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO performance_records (
+                                id, content_id, platform, observed_at, views, clicks, orders, commission_idr, data_source
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                rec_id,
+                                rec.content_id,
+                                rec.platform,
+                                rec.observed_at.isoformat(),
+                                rec.views,
+                                rec.clicks,
+                                rec.orders,
+                                rec.commission_idr,
+                                rec.data_source,
+                            ),
+                        )
+                    except sqlite3.IntegrityError as e:
+                        raise ValueError(
+                            f"Snapshot performa dengan ID '{rec_id}' sudah ada di database. "
+                            f"Snapshot historis tidak boleh ditimpa secara tidak sengaja."
+                        ) from e
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO performance_records (
+                            id, content_id, platform, observed_at, views, clicks, orders, commission_idr, data_source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            content_id=excluded.content_id,
+                            platform=excluded.platform,
+                            observed_at=excluded.observed_at,
+                            views=excluded.views,
+                            clicks=excluded.clicks,
+                            orders=excluded.orders,
+                            commission_idr=excluded.commission_idr,
+                            data_source=excluded.data_source
+                        """,
+                        (
+                            rec_id,
+                            rec.content_id,
+                            rec.platform,
+                            rec.observed_at.isoformat(),
+                            rec.views,
+                            rec.clicks,
+                            rec.orders,
+                            rec.commission_idr,
+                            rec.data_source,
+                        ),
+                    )
             return rec_id
         finally:
             if self._conn_str != ":memory:":
@@ -570,7 +598,7 @@ class Database:
     ) -> list[PerformanceRecord]:
         """List performance record snapshots filtered by content, platform, or date range.
 
-        Returns snapshots sorted chronologically (observed_at ASC, id ASC).
+        Returns snapshots sorted chronologically with deterministic tie-breaking (observed_at ASC, id ASC).
         """
         conn = self.get_connection()
         try:
@@ -583,11 +611,29 @@ class Database:
                 query += " AND platform = ?"
                 params.append(platform)
             if start_date:
-                start_iso = start_date.isoformat() if isinstance(start_date, datetime) else str(start_date)
+                if isinstance(start_date, datetime):
+                    dt_start = start_date if start_date.tzinfo else start_date.replace(tzinfo=timezone.utc)
+                    start_iso = dt_start.astimezone(timezone.utc).isoformat()
+                else:
+                    try:
+                        parsed = datetime.fromisoformat(str(start_date).strip())
+                        dt_start = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                        start_iso = dt_start.astimezone(timezone.utc).isoformat()
+                    except Exception:
+                        start_iso = str(start_date)
                 query += " AND observed_at >= ?"
                 params.append(start_iso)
             if end_date:
-                end_iso = end_date.isoformat() if isinstance(end_date, datetime) else str(end_date)
+                if isinstance(end_date, datetime):
+                    dt_end = end_date if end_date.tzinfo else end_date.replace(tzinfo=timezone.utc)
+                    end_iso = dt_end.astimezone(timezone.utc).isoformat()
+                else:
+                    try:
+                        parsed = datetime.fromisoformat(str(end_date).strip())
+                        dt_end = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                        end_iso = dt_end.astimezone(timezone.utc).isoformat()
+                    except Exception:
+                        end_iso = str(end_date)
                 query += " AND observed_at <= ?"
                 params.append(end_iso)
 

@@ -347,3 +347,33 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   9. `test_duplicate_record_id_handling`: Penanganan tabrakan ID snapshot dilakukan secara eksplisit via `ON CONFLICT(id) DO UPDATE` (`PASS`).
   10. `test_cli_performance_record_show_summary_smoke`: Pengujian smoke test seluruh subperintah CLI (`performance record`, `performance show`, `performance summary`) berjalan sukses dengan pencatatan audit log (`PASS`).
   11. `test_cli_rejects_invalid_inputs_with_nonzero_exit_code`: CLI menolak nilai negatif, format timestamp tidak valid, dan rentang tanggal salah dengan pesan diagnostik yang jelas dan exit code 1 (`PASS`).
+
+---
+
+## 11. Verifikasi Phase 2.1: Data Integrity & Analytics Hardening
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 65 tests in 3.309s
+
+  OK
+  ```
+- **Rincian Pengujian & Perbaikan Hardening (10 Test Cases Baru & Pembaruan pada `tests/test_performance.py`):**
+  1. `test_duplicate_record_id_handling`: Penolakan tegas atas penimpaan tidak sengaja pada snapshot historis via `ValueError` ketika `allow_overwrite=False`. Snapshot hanya dapat diperbarui jika `allow_overwrite=True` diberikan secara eksplisit (`PASS`).
+  2. `test_non_finite_commission_rejected`: Validator `PerformanceRecord` menolak nilai non-finite untuk komisi (`NaN`, `+Inf`, `-Inf`) via `math.isnan` dan `math.isinf` (`PASS`).
+  3. `test_timezone_normalization`: Validator `observed_at` menormalisasi seluruh timestamp (naive maupun aware seperti UTC+7) menjadi UTC eksplisit (`timezone.utc`) (`PASS`).
+  4. `test_identical_timestamps_deterministic_tiebreak`: Snapshot dengan waktu observasi identik diurutkan secara deterministik dengan tie-breaker ID (`observed_at ASC, id ASC`), menjamin konsistensi pemilihan snapshot terbaru pada ringkasan (`PASS`).
+  5. `test_cohort_conversion_rates_partial_unknown`: Rasio konversi agregat (CTR, Click-to-Order, CPO, CPC) dihitung secara ketat hanya pada kohort konten yang memiliki data pembilang dan penyebut lengkap, mencegah distorsi dari data metrik parsial (`PASS`).
+  6. `test_all_metrics_unknown`: Penanganan kasus di mana seluruh metrik bernilai `None` tetap menghasilkan total `None` dan rasio `None` tanpa disulap menjadi 0 (`PASS`).
+  7. `test_recorded_true_zeros`: Nilai 0 yang benar-benar tercatat (bukan `None`) dipertahankan secara akurat pada akumulasi total dan perhitungan rasio (`PASS`).
+  8. `test_summary_date_filtering_excludes_out_of_range`: Kueri rentang tanggal mengabaikan snapshot di luar batas jendela observasi secara presisi dengan normalisasi string ISO UTC (`PASS`).
+  9. `test_summary_period_delta`: Perhitungan delta pertumbuhan metrik (tayangan, klik, pesanan, komisi) antar-snapshot dalam jendela filter observasi berjalan akurat (`PASS`).
+  10. `test_cli_performance_correct_smoke`: Pengujian smoke test subperintah CLI baru `performance correct` untuk pembaruan snapshot eksplisit dengan pencatatan audit log `action="correct_snapshot"` (`PASS`).
+  11. `test_cli_duplicate_record_id_fails_without_audit_event`: Kegagalan pencatatan snapshot via CLI akibat duplikasi ID mengembalikan exit code 1 dan tidak memicu pembuatan audit event sukses palsu (`PASS`).
