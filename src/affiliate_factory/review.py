@@ -25,6 +25,7 @@ def review_claim(
     claim_id: str,
     status: Literal["VERIFIED", "REJECTED"],
     reviewer_note: str | None = None,
+    expected_prompt_version: str | None = None,
     run_id: str | None = None,
 ) -> Claim:
     """Explicitly review an individual claim, setting status to VERIFIED or REJECTED.
@@ -38,6 +39,49 @@ def review_claim(
     claim = db.get_claim(claim_id)
     if not claim:
         raise ReviewError(f"Claim with ID '{claim_id}' not found.")
+
+    if expected_prompt_version is not None and claim.prompt_version is not None:
+        if claim.prompt_version != expected_prompt_version:
+            raise ReviewError(
+                f"Claim '{claim_id}' belongs to prompt version '{claim.prompt_version}', "
+                f"but expected '{expected_prompt_version}'."
+            )
+
+    # Invariant: Claims belonging to an approved draft cannot be modified.
+    # Invariant: Claims belonging to a rejected draft cannot be reviewed.
+    if claim.prompt_version:
+        draft = db.get_draft(claim.draft_id, claim.prompt_version)
+        if draft:
+            if draft.status == "approved":
+                raise ReviewError(
+                    f"Cannot modify claim '{claim_id}': draft '{draft.id}' (v{draft.prompt_version}) is already APPROVED. "
+                    f"Create a revised draft version to review modified claims."
+                )
+            if draft.status == "rejected":
+                raise ReviewError(
+                    f"Cannot review claim '{claim_id}': draft '{draft.id}' (v{draft.prompt_version}) is REJECTED. "
+                    f"Claims belonging to a rejected draft cannot be reviewed. Please create a revised prompt version."
+                )
+    else:
+        conn = db.get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT status, prompt_version FROM content_drafts WHERE id = ?",
+                (claim.draft_id,),
+            ).fetchall()
+            if any(r["status"] == "approved" for r in rows):
+                raise ReviewError(
+                    f"Cannot modify claim '{claim_id}': associated draft '{claim.draft_id}' is already APPROVED. "
+                    f"Create a revised draft version to review modified claims."
+                )
+            if rows and all(r["status"] == "rejected" for r in rows):
+                raise ReviewError(
+                    f"Cannot review claim '{claim_id}': associated draft '{claim.draft_id}' is REJECTED. "
+                    f"Claims belonging to a rejected draft cannot be reviewed. Please create a revised prompt version."
+                )
+        finally:
+            if db._conn_str != ":memory:":
+                conn.close()
 
     updated = db.update_claim_status(claim_id, status)
     if not updated:
@@ -113,7 +157,7 @@ def approve_draft(
         )
 
     # Claims Gate: Every claim must be explicitly human-reviewed as VERIFIED
-    claims = db.get_claims_for_draft(draft_id)
+    claims = db.get_claims_for_draft(draft_id, prompt_version=prompt_version)
     if claims:
         unverified = [c for c in claims if c.verification_status == "UNVERIFIED"]
         if unverified:

@@ -61,6 +61,7 @@ class Claim(BaseModel):
 
     id: str
     draft_id: str
+    prompt_version: str | None = None
     text: str
     source_ref: str | None = None
     verification_status: Literal["UNVERIFIED", "SOURCED", "VERIFIED", "REJECTED"] = "UNVERIFIED"

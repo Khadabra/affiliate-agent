@@ -50,6 +50,7 @@ def check_claims(
         evaluated = Claim(
             id=c.id,
             draft_id=c.draft_id,
+            prompt_version=c.prompt_version,
             text=c.text,
             source_ref=c.source_ref,
             verification_status=status,

@@ -81,6 +81,37 @@ class Database:
                             """
                         )
 
+                # Check for legacy claims schema without prompt_version
+                table_check_claims = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='claims'"
+                ).fetchone()
+                if table_check_claims:
+                    claim_cols = {
+                        row["name"]
+                        for row in conn.execute("PRAGMA table_info(claims)").fetchall()
+                    }
+                    if "prompt_version" not in claim_cols:
+                        conn.execute("ALTER TABLE claims ADD COLUMN prompt_version TEXT")
+                        # Migrate existing claims:
+                        # If prompt_version can be unambiguously established (exactly 1 distinct version
+                        # in content_drafts for that draft_id), associate it.
+                        # If 0 or >1 versions (ambiguous), leave as NULL (do NOT fabricate).
+                        draft_ids = [
+                            row["draft_id"]
+                            for row in conn.execute("SELECT DISTINCT draft_id FROM claims").fetchall()
+                        ]
+                        for d_id in draft_ids:
+                            pv_rows = conn.execute(
+                                "SELECT DISTINCT prompt_version FROM content_drafts WHERE id = ?",
+                                (d_id,),
+                            ).fetchall()
+                            if len(pv_rows) == 1:
+                                single_pv = pv_rows[0]["prompt_version"]
+                                conn.execute(
+                                    "UPDATE claims SET prompt_version = ? WHERE draft_id = ? AND prompt_version IS NULL",
+                                    (single_pv, d_id),
+                                )
+
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS products (
@@ -112,10 +143,12 @@ class Database:
                     CREATE TABLE IF NOT EXISTS claims (
                         id TEXT PRIMARY KEY,
                         draft_id TEXT NOT NULL,
+                        prompt_version TEXT,
                         text TEXT NOT NULL,
                         source_ref TEXT,
                         verification_status TEXT NOT NULL
                     );
+                    CREATE INDEX IF NOT EXISTS idx_claims_draft_version ON claims (draft_id, prompt_version);
 
                     CREATE TABLE IF NOT EXISTS compliance_reports (
                         draft_id TEXT NOT NULL,
@@ -355,15 +388,28 @@ class Database:
         try:
             with conn:
                 for c in claims:
+                    pv = c.prompt_version
+                    if pv is None:
+                        # Check if there is exactly 1 distinct prompt_version for this draft in content_drafts
+                        pv_rows = conn.execute(
+                            "SELECT DISTINCT prompt_version FROM content_drafts WHERE id = ?",
+                            (c.draft_id,),
+                        ).fetchall()
+                        if len(pv_rows) == 1:
+                            pv = pv_rows[0]["prompt_version"]
+
                     conn.execute(
                         """
-                        INSERT INTO claims (id, draft_id, text, source_ref, verification_status)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO claims (id, draft_id, prompt_version, text, source_ref, verification_status)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
+                            draft_id=excluded.draft_id,
+                            prompt_version=excluded.prompt_version,
+                            text=excluded.text,
                             source_ref=excluded.source_ref,
                             verification_status=excluded.verification_status
                         """,
-                        (c.id, c.draft_id, c.text, c.source_ref, c.verification_status),
+                        (c.id, c.draft_id, pv, c.text, c.source_ref, c.verification_status),
                     )
         finally:
             if self._conn_str != ":memory:":
@@ -379,6 +425,7 @@ class Database:
             return Claim(
                 id=row["id"],
                 draft_id=row["draft_id"],
+                prompt_version=row["prompt_version"] if "prompt_version" in row.keys() else None,
                 text=row["text"],
                 source_ref=row["source_ref"],
                 verification_status=row["verification_status"],
@@ -401,15 +448,25 @@ class Database:
             if self._conn_str != ":memory:":
                 conn.close()
 
-    def get_claims_for_draft(self, draft_id: str) -> list[Claim]:
+    def get_claims_for_draft(self, draft_id: str, prompt_version: str | None = None) -> list[Claim]:
         conn = self.get_connection()
         try:
-            cursor = conn.execute("SELECT * FROM claims WHERE draft_id = ?", (draft_id,))
+            if prompt_version is not None:
+                cursor = conn.execute(
+                    "SELECT * FROM claims WHERE draft_id = ? AND prompt_version = ? ORDER BY id ASC",
+                    (draft_id, prompt_version),
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM claims WHERE draft_id = ? ORDER BY id ASC",
+                    (draft_id,),
+                )
             rows = cursor.fetchall()
             return [
                 Claim(
                     id=row["id"],
                     draft_id=row["draft_id"],
+                    prompt_version=row["prompt_version"] if "prompt_version" in row.keys() else None,
                     text=row["text"],
                     source_ref=row["source_ref"],
                     verification_status=row["verification_status"],

@@ -287,3 +287,32 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   14. `test_failed_export_leaves_no_misleading_pack_or_event`: Kegagalan penulisan saat staging tidak meninggalkan berkas paket parsial dan tidak mencatat event sukses ekspor (`PASS`).
   15. `test_database_migration_compliance_reports`: Database legacy dengan primary key tunggal `draft_id` termigrasi secara transparan menjadi komposit `(draft_id, prompt_version)` tanpa kehilangan data legacy dan mendukung multiversi (`PASS`).
   16. `test_cli_review_and_export_smoke`: Smoke test terhadap seluruh subperintah CLI `review show`, `review claim`, `review approve`, `review reject`, dan `export` berjalan dengan exit code 0 (`PASS`).
+
+
+---
+
+## 9. Verifikasi Phase 1.1: Isolasi Klaim per Versi Draf, Invariant Review Gate, dan Eksportir
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 44 tests in 1.948s
+
+  OK
+  ```
+- **Rincian Pengujian Baru (9 Test Cases pada `tests/test_phase1_1_isolation.py`):**
+  1. `test_claims_isolated_across_prompt_versions_for_same_draft_id`: Draf dengan ID sama yang memiliki versi prompt v1.0 dan v2.0 memiliki klaim terisolasi. Klaim `UNVERIFIED` pada v1.0 tidak memblokir persetujuan v2.0, dan v1.0 tetap diblokir persetujuannya (`PASS`).
+  2. `test_export_of_v2_never_includes_v1_claims`: Ekspor paket konten versi v2.0 hanya memuat klaim versi v2.0 pada berkas `review_checklist.md` dan tidak membocorkan klaim versi v1.0 (`PASS`).
+  3. `test_cannot_modify_claims_of_approved_draft`: Modifikasi atau penelaahan ulang klaim pada draf yang telah berstatus `approved` diblokir dengan `ReviewError` (`PASS`).
+  4. `test_cannot_review_claims_of_rejected_draft`: Penelaahan klaim pada draf yang berstatus `rejected` diblokir dengan `ReviewError` (status terminal mewajibkan revisi versi prompt baru) (`PASS`).
+  5. `test_expected_prompt_version_mismatch_raises_error`: Penelaahan klaim dengan parameter versi prompt yang tidak cocok dengan versi klaim memicu `ReviewError` (`PASS`).
+  6. `test_fail_closed_sourced_claim_without_human_verification_blocks_approval`: Klaim berstatus `SOURCED` (memiliki tautan rujukan sumber) tetap memblokir persetujuan draf hingga ditelaah dan diverifikasi eksplisit oleh manusia (`PASS`).
+  7. `test_safe_overwrite_preserves_original_on_failure`: Penimpaan paket konten yang gagal di tengah proses secara otomatis memulihkan direktori asli dari cadangan sehingga berkas valid sebelumnya tidak hilang atau rusak (`PASS`).
+  8. `test_symlink_target_rejection`: Upaya ekspor ke direktori target yang merupakan symlink langsung ditolak (`ValueError`) (`PASS`).
+  9. `test_database_migration_claims_prompt_version`: Tabel `claims` legacy tanpa kolom `prompt_version` termigrasi secara otomatis ke skema baru; draf versi tunggal diasosiasikan secara pasti, sementara draf multiversi atau yatim dibiarkan `NULL` tanpa fabrikasi data (`PASS`).

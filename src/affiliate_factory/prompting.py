@@ -195,7 +195,8 @@ def parse_and_validate_ai_draft(
 
         claims.append(
             Claim(
-                id=f"claim_{effective_draft_id}_{idx}",
+                id=f"claim_{effective_draft_id}_{prompt_version.replace('.', '_')}_{idx}",
+                prompt_version=prompt_version,
                 draft_id=effective_draft_id,
                 text=c.text.strip(),
                 source_ref=c.source_ref.strip() if c.source_ref else None,

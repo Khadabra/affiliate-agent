@@ -91,9 +91,15 @@ def export_content_pack(
     base_dir = Path(base_output_dir).resolve()
     target_dir = (base_dir / safe_draft_id).resolve()
 
-    # Double check that resolved path stays inside base_dir
-    if not str(target_dir).startswith(str(base_dir)):
+    # Path traversal protection via relative_to
+    try:
+        target_dir.relative_to(base_dir)
+    except ValueError:
         raise ValueError(f"Target path '{target_dir}' escapes base directory '{base_dir}'.")
+
+    # Symlink protection
+    if target_dir.is_symlink():
+        raise ValueError(f"Target path '{target_dir}' is a symlink. Symlinks are not permitted for content packs.")
 
     # 1. Fetch draft and check status
     draft = db.get_draft(draft_id, prompt_version)
@@ -118,7 +124,7 @@ def export_content_pack(
     if not product:
         raise ExportGateError(f"Product ID '{draft.product_id}' for draft '{draft_id}' not found.")
 
-    claims = db.get_claims_for_draft(draft_id)
+    claims = db.get_claims_for_draft(draft_id, prompt_version=prompt_version)
 
     # 4. Collision check
     if target_dir.exists():
@@ -132,6 +138,7 @@ def export_content_pack(
     base_dir.mkdir(parents=True, exist_ok=True)
     staging_dir = base_dir / f".staging_{safe_draft_id}_{uuid.uuid4().hex[:8]}"
     staging_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir: Path | None = None
 
     try:
         # a. script.md
@@ -236,17 +243,26 @@ def export_content_pack(
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest_data, f, indent=2)
 
-        # 6. Atomic move to target_dir
+        # 6. Atomic move to target_dir with safe backup and rollback
         if target_dir.exists() and overwrite:
-            shutil.rmtree(target_dir)
-
-        # Rename staging directory to final target
-        staging_dir.rename(target_dir)
+            backup_dir = base_dir / f".backup_{safe_draft_id}_{uuid.uuid4().hex[:8]}"
+            target_dir.rename(backup_dir)
+            try:
+                staging_dir.rename(target_dir)
+            except Exception:
+                if backup_dir.exists() and not target_dir.exists():
+                    backup_dir.rename(target_dir)
+                raise
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        else:
+            staging_dir.rename(target_dir)
 
     except Exception:
-        # Clean up staging directory on any error to prevent partial writes
+        # Clean up staging directory and restore backup on any error
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+        if backup_dir and backup_dir.exists() and not target_dir.exists():
+            backup_dir.rename(target_dir)
         raise
 
     # 7. Record export event ONLY after successful atomic placement

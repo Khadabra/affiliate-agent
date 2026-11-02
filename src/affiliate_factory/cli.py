@@ -205,7 +205,7 @@ def cmd_review_show(args: argparse.Namespace) -> int:
         return 1
 
     comp_report = db.get_compliance_report(args.draft_id, args.version or "v1.0")
-    claims = db.get_claims_for_draft(args.draft_id)
+    claims = db.get_claims_for_draft(args.draft_id, prompt_version=args.version or 'v1.0')
 
     print("\n=== DETAIL CONTENT DRAFT ===")
     print(f"ID             : {draft.id}")
@@ -251,6 +251,7 @@ def cmd_review_claim(args: argparse.Namespace) -> int:
             claim_id=args.claim_id,
             status=args.status,
             reviewer_note=args.note,
+            expected_prompt_version=getattr(args, "version", None),
         )
         print(f"\n[SUKSES] Klaim '{claim.id}' berhasil ditelaah manusia.")
         print(f"Status Baru : {claim.verification_status}")
@@ -393,6 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     r_claim = review_subparsers.add_parser("claim", help="Telaah klaim individual (VERIFIED / REJECTED).")
     r_claim.add_argument("--claim-id", required=True, help="ID klaim.")
     r_claim.add_argument("--status", choices=["VERIFIED", "REJECTED"], required=True, help="Status penelaahan manusia.")
+    r_claim.add_argument("--version", help="Versi prompt yang diasosiasikan dengan klaim (opsional).")
     r_claim.add_argument("--note", help="Catatan bukti penelaahan.")
     r_claim.add_argument("--db", help="Path ke SQLite database.")
     r_claim.set_defaults(func=cmd_review_claim)
