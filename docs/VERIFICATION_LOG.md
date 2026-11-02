@@ -10,10 +10,11 @@ Dokumen ini mencatat seluruh perintah pengujian, output aktual, bukti empiris di
 | :--- | :--- | :--- | :--- | :--- |
 | 2026-11-02 | Workspace Directory | `Get-ChildItem -Force -Recurse` | Direktori awal kosong | `VERIFIED` |
 | 2026-11-02 | OS Version | Windows 11 x86_64 Environment | Running Windows PowerShell | `VERIFIED` |
-| 2026-11-02 | Git Work Tree Status | `git rev-parse --is-inside-work-tree` | `fatal: not a git repository ...` (Exit Code 1) | `VERIFIED` (Bukan repo Git) |
-| 2026-11-02 | Git Status Execution | N/A (Dibatalkan sesuai aturan) | Tidak dijalankan karena repo belum ada | `VERIFIED` |
-| 2026-11-02 | Git Ignore File | `Test-Path .gitignore` | `False` (Belum ada file `.gitignore`) | `VERIFIED` |
-| 2026-11-02 | Workspace Path Safety | Evaluasi string path | Path: `d:\Khadabra\Kerjaan gua\affiliate` (Mengandung spasi) | `VERIFIED` (Risiko Spasi) |
+| 2026-11-02 | Git Work Tree Status | `git rev-parse --is-inside-work-tree` | `fatal: not a git repository ...` (Exit Code 1) | `VERIFIED` (Awalnya bukan repo Git) |
+| 2026-11-02 | Git Initialization | `git init` | Initialized empty Git repository | `VERIFIED TESTED` |
+| 2026-11-02 | Git Ignore Setup | Pembuatan `.gitignore` | Mengabaikan `.env`, `.venv/`, `tmp/`, media, db; meng-commit `uv.lock` | `VERIFIED` |
+| 2026-11-02 | Initial Rollback Commit | `git commit` | Commit `1463915` (Titik rollback aman) | `VERIFIED` |
+| 2026-11-02 | Workspace Path Safety | Evaluasi string path | Path: `d:\Khadabra\Kerjaan gua\affiliate` (Mengandung spasi) | `VERIFIED` (Wajib Quoting/Pathlib) |
 | 2026-11-02 | Python Host Version | `python --version` | `Python 3.15.0` (System Default) | `VERIFIED` |
 | 2026-11-02 | Python Package Tool | `uv --version` | `uv 0.13.5 (46776a95d 2026-10-21)` | `VERIFIED` |
 | 2026-11-02 | GPU & VRAM | `nvidia-smi` | RTX 4050 Laptop (6141 MiB VRAM), Driver `581.32`, CUDA `13.0` | `VERIFIED` |
@@ -109,21 +110,62 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
 
 ---
 
-## 3. Verifikasi Kebijakan & API Shopee Indonesia (Fase 0B)
+## 3. Verifikasi Kebijakan & API Shopee Indonesia (Fase 0B & M0)
 
-| Topik Pemeriksaan | Sumber Bukti | Temuan Aktual | Status |
-| :--- | :--- | :--- | :--- |
-| **Pembedaan Shopee API** | `open.shopee.com` vs `affiliate.shopee.co.id` | **Shopee Open Platform (AMS):** Untuk Seller/Brand mengelola komisi toko. Menggunakan `partner_id` & OAuth.<br>**Shopee Affiliate Open API:** Untuk Creator/Publisher menghasilkan link affiliate dan melihat komisi. Menggunakan `AppId`, `Secret`, dan GraphQL. | `VERIFIED` |
-| **Endpoint Affiliate ID** | Dokumentasi Affiliate Open API | Endpoint resmi Indonesia: `https://open-api.affiliate.shopee.co.id/graphql`. Autentikasi via header `Authorization: SHA256 Credential={AppId},Timestamp={Timestamp},Signature={Signature}`. | `VERIFIED` |
-| **Fitur API Affiliate** | GraphQL Schema docs | Mendukung mutasi `generateShortLink` dengan `subIds` (maks 5 sub-ID untuk tracking) dan query katalog `productOfferV2`. | `VERIFIED` |
-| **Kredensial User Saat Ini** | Belum ada akun terdaftar di sistem | Ketersediaan `AppId` dan `Secret` milik user untuk affiliate API Indonesia | `NOT VERIFIED` |
-| **Kebijakan AI di Shopee Video** | `help.shopee.co.id` | Shopee Video mewajibkan kreator memberi **label konten AI** jika video dihasilkan atau diedit secara signifikan dengan AI. Terdapat sistem deteksi otomatis; konten AI yang menyesatkan atau tanpa label dapat dibatasi visibilitasnya hingga dihapus. | `VERIFIED` |
-| **Kebijakan Hak Cipta & Re-upload** | `help.shopee.co.id` | Shopee melarang keras pencurian konten (*content theft*). Mengunduh video seller/kreator lain lalu mengunggah ulang tanpa izin melanggar HAKI dan berisiko terkena penalti poin kesehatan hingga penutupan akun. | `VERIFIED` |
+| Topik Pemeriksaan | Sumber Bukti | Temuan Aktual | Status | File Rujukan |
+| :--- | :--- | :--- | :--- | :--- |
+| **Endpoint Affiliate ID** | `affise.com` & `open.shopee.com` | `https://open-api.affiliate.shopee.co.id/graphql` ada di dokumentasi integrasi, namun belum terbuka di portal publik tanpa login. | `DOCUMENTATION_ONLY` | [01_affiliate_api_endpoint.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/01_affiliate_api_endpoint.md) |
+| **Metode Signature** | Shopee Docs & GraphQL schema | Seller API: **HMAC-SHA256**. Affiliate GraphQL: **SHA-256 biasa** (`appId + ts + payload + secret`). Signature adalah hash satu arah, bukan enkripsi. | `DOCUMENTATION_ONLY` | [02_request_signature_method.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/02_request_signature_method.md) |
+| **Batas Sub-IDs** | GraphQL Docs `generateShortLink` | Parameter `subIds: [String]` menerima hingga maksimal 5 sub-ID tracking. | `DOCUMENTATION_ONLY` | [03_subids_limit.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/03_subids_limit.md) |
+| **Aturan Label AI & HAKI** | Shopee Help Article 71218 & 71217 | Label AI wajib pada Shopee Video. Larangan pencurian konten / re-upload tanpa izin berlaku universal di Shopee Video dan Affiliate. | `VERIFIED` | [04_ai_label_and_content_theft.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/04_ai_label_and_content_theft.md) |
+| **Disclosure & Anti-Scraping** | Shopee Help Article 71217 & 71218 | Larangan keras penggunaan robot, spider, dan skrip otomatis pengumpul informasi. Kewajiban tautan partisipan resmi & disclosure promosi. | `VERIFIED` | [05_disclosure_and_automation_rules.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/05_disclosure_and_automation_rules.md) |
 
 ---
 
-## 4. Item yang Masih Belum Terverifikasi (`NOT VERIFIED`)
+## 4. Hasil Pengujian Unit Test Fondasi (Fase M2)
 
-1. **Akses Kredensial Shopee:** Apakah user memiliki `AppId` dan `Secret` di portal `affiliate.shopee.co.id`.
-2. **Runtime LLM API Provider:** Provider dan API key yang akan disediakan pengguna untuk runtime naskah.
-3. **Kesesuaian Skill Claude Tertentu:** Pengujian format instruksi `awesome-claude-skills` secara spesifik terhadap Antigravity IDE (masih berstatus `ASSUMPTION`).
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src"; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal Mentah:**
+  ```text
+  test_claim_without_source_is_unverified (test_core.TestAffiliateFactoryCore.test_claim_without_source_is_unverified) ... ok
+  test_draft_with_prohibited_claim_fails_with_correct_rule_id (test_core.TestAffiliateFactoryCore.test_draft_with_prohibited_claim_fails_with_correct_rule_id) ... ok
+  test_draft_without_disclosure_fails_compliance (test_core.TestAffiliateFactoryCore.test_draft_without_disclosure_fails_compliance) ... ok
+  test_duplicate_product_url_does_not_duplicate (test_core.TestAffiliateFactoryCore.test_duplicate_product_url_does_not_duplicate) ... ok
+  test_orchestrator_run_twice_idempotence (test_core.TestAffiliateFactoryCore.test_orchestrator_run_twice_idempotence) ... ok
+  test_performance_record_unknown_fields_remain_none (test_core.TestAffiliateFactoryCore.test_performance_record_unknown_fields_remain_none) ... ok
+  test_valid_draft_passes_compliance (test_core.TestAffiliateFactoryCore.test_valid_draft_passes_compliance) ... ok
+
+  ----------------------------------------------------------------------
+  Ran 7 tests in 0.009s
+
+  OK
+  ```
+- **Kesimpulan Evaluasi:**
+  1. `test_draft_without_disclosure_fails_compliance`: Draft tanpa disclosure terdeteksi gagal dengan finding `RULE-DISCLOSURE-01` (`PASS`).
+  2. `test_draft_with_prohibited_claim_fails_with_correct_rule_id`: Klaim "pasti sembuh" terdeteksi gagal dengan finding `RULE-PROHIBITED-CLAIMS-01` (`PASS`).
+  3. `test_valid_draft_passes_compliance`: Draft valid dengan disclosure dan label AI lolos evaluasi (`PASS`).
+  4. `test_claim_without_source_is_unverified`: Klaim tanpa `source_ref` ditandai `UNVERIFIED`; klaim dengan sumber ditandai `SOURCED` (`PASS`).
+  5. `test_duplicate_product_url_does_not_duplicate`: Ingest produk dengan URL sama dua kali mengembalikan record yang ada tanpa menduplikasi baris di tabel `products` (`PASS`).
+  6. `test_orchestrator_run_twice_idempotence`: Menjalankan pipeline dua kali pada draft yang sama menghasilkan tepat 1 baris draft dan status tetap tertahan di `waiting_approval` (`PASS`).
+  7. `test_performance_record_unknown_fields_remain_none`: Metrik performa yang tidak diketahui tetap bernilai `None` di memori dan saat disimpan/diambil dari SQLite, tidak pernah berubah menjadi `0` (`PASS`).
+
+---
+
+## 5. Audit Kloning Referensi & Studi Kelayakan Animasi (Fase V0)
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Perintah Kloning (Read-Only):**
+  ```powershell
+  git clone https://github.com/humaedihume/kantor-agent tmp/reference/kantor-agent
+  ```
+- **Exit Code:** `0`
+- **Tindakan Kepatuhan:**
+  - File skrip `kantor.sh`, `serve-node.mjs`, atau skrip lainnya **TIDAK DIJALANKAN**.
+  - Kode dianalisis secara *read-only* murni untuk mengekstrak skema JSON dan mekanisme pembacaan transkrip.
+  - Laporan lengkap diterbitkan di [docs/VIZ_FEASIBILITY.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/VIZ_FEASIBILITY.md).

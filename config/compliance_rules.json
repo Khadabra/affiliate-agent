@@ -1,0 +1,67 @@
+{
+  "_metadata": {
+    "status": "STARTER",
+    "note": "Aturan awal untuk pengujian internal (M2). Belum divalidasi secara hukum/resmi terhadap regulasi resmi Shopee Indonesia, BPOM, atau OJK."
+  },
+  "rules": [
+    {
+      "rule_id": "RULE-DISCLOSURE-01",
+      "name": "Kewajiban Disclosure Afiliasi",
+      "severity": "ERROR",
+      "reason": "Regulasi perlindungan konsumen dan kebijakan Shopee mewajibkan konten promosi afiliasi memberikan penandaan yang jelas agar tidak menyesatkan pembeli.",
+      "check_type": "mandatory_text",
+      "required_keywords": ["#ShopeeAffiliate", "#AfiliasiShopee", "afiliasi", "komisi", "ad", "sponsor", "paid partnership"]
+    },
+    {
+      "rule_id": "RULE-AI-LABEL-01",
+      "name": "Kewajiban Label Konten AI",
+      "severity": "WARNING",
+      "reason": "Shopee Video mewajibkan deklarasi label konten AI jika video atau materi dibuat atau diedit secara signifikan dengan teknologi AI.",
+      "check_type": "mandatory_ai_label",
+      "required_keywords": ["#KontenAI", "#AIGenerated", "dibuat dengan ai", "diedit dengan ai", "label ai"]
+    },
+    {
+      "rule_id": "RULE-PROHIBITED-CLAIMS-01",
+      "name": "Larangan Klaim Berbahaya / Mutlak",
+      "severity": "ERROR",
+      "reason": "Klaim absolut atau medis tanpa dasar ilmiah (seperti pasti sembuh, 100% ampuh) melanggar etika periklanan dan aturan BPOM.",
+      "check_type": "prohibited_terms",
+      "prohibited_terms": [
+        "pasti sembuh",
+        "100% ampuh",
+        "dijamin sembuh",
+        "tanpa efek samping",
+        "terbukti menyembuhkan segala penyakit",
+        "dijamin kaya"
+      ]
+    },
+    {
+      "rule_id": "RULE-BANNED-CATEGORIES-01",
+      "name": "Larangan Kategori Produk Terlarang",
+      "severity": "ERROR",
+      "reason": "Shopee melarang promosi barang terlarang seperti tembakau, rokok elektrik, zat terlarang, konten dewasa, dan barang bajakan/palsu.",
+      "check_type": "prohibited_categories",
+      "prohibited_terms": [
+        "rokok",
+        "vape",
+        "rokok elektrik",
+        "liquid vape",
+        "obat terlarang",
+        "narkoba",
+        "produk dewasa",
+        "alat bantu seks",
+        "barang tiruan",
+        "barang palsu",
+        "kw super",
+        "replika ilegal"
+      ]
+    },
+    {
+      "rule_id": "RULE-PRICE-DATE-01",
+      "name": "Kewajiban Tanggal Observasi Harga",
+      "severity": "ERROR",
+      "reason": "Harga dan promo di e-commerce berubah secara dinamis; penyebutan harga wajib disertai tanggal observasi agar tidak menyesatkan.",
+      "check_type": "price_date_required"
+    }
+  ]
+}
