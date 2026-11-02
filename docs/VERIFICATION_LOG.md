@@ -110,15 +110,18 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
 
 ---
 
-## 3. Verifikasi Kebijakan & API Shopee Indonesia (Fase 0B & M0)
+## 3. Verifikasi Kebijakan & API Shopee Indonesia (Fase 0B, M0 & H0)
 
 | Topik Pemeriksaan | Sumber Bukti | Temuan Aktual | Status | File Rujukan |
 | :--- | :--- | :--- | :--- | :--- |
-| **Endpoint Affiliate ID** | `affise.com` & `open.shopee.com` | `https://open-api.affiliate.shopee.co.id/graphql` ada di dokumentasi integrasi, namun belum terbuka di portal publik tanpa login. | `DOCUMENTATION_ONLY` | [01_affiliate_api_endpoint.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/01_affiliate_api_endpoint.md) |
-| **Metode Signature** | Shopee Docs & GraphQL schema | Seller API: **HMAC-SHA256**. Affiliate GraphQL: **SHA-256 biasa** (`appId + ts + payload + secret`). Signature adalah hash satu arah, bukan enkripsi. | `DOCUMENTATION_ONLY` | [02_request_signature_method.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/02_request_signature_method.md) |
-| **Batas Sub-IDs** | GraphQL Docs `generateShortLink` | Parameter `subIds: [String]` menerima hingga maksimal 5 sub-ID tracking. | `DOCUMENTATION_ONLY` | [03_subids_limit.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/03_subids_limit.md) |
-| **Aturan Label AI & HAKI** | Shopee Help Article 71218 & 71217 | Label AI wajib pada Shopee Video. Larangan pencurian konten / re-upload tanpa izin berlaku universal di Shopee Video dan Affiliate. | `VERIFIED` | [04_ai_label_and_content_theft.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/04_ai_label_and_content_theft.md) |
-| **Disclosure & Anti-Scraping** | Shopee Help Article 71217 & 71218 | Larangan keras penggunaan robot, spider, dan skrip otomatis pengumpul informasi. Kewajiban tautan partisipan resmi & disclosure promosi. | `VERIFIED` | [05_disclosure_and_automation_rules.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/05_disclosure_and_automation_rules.md) |
+| **Endpoint Affiliate ID** | `affiliate.shopee.co.id` & `open.shopee.com` | `open-api.affiliate.shopee.co.id/graphql` tidak tertulis pada halaman publik tanpa login. Landing page adalah login form. | `NOT_VERIFIED` | [01_affiliate_api_endpoint.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/01_affiliate_api_endpoint.md) |
+| **Metode Signature** | Shopee Docs & GraphQL schema | Pertentangan sumber: Seller v2 pakai HMAC-SHA256, komunitas affiliate pakai SHA-256 biasa. Metode tanda tangan hanya bisa dipastikan dengan kredensial nyata. | `NOT_VERIFIED` | [02_request_signature_method.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/02_request_signature_method.md) |
+| **Batas Sub-IDs** | `affiliateshopee.com.br` | Kata `subids` tidak ditemukan pada HTML halaman tersebut. | `NOT_VERIFIED` | [03_subids_limit.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/03_subids_limit.md) |
+| **HAKI & Content Theft** | Shopee Help Article 71218 | Kutipan: *"Hak cipta adalah hak hukum yang sah yang melindungi karya orisinal (misalnya musik, video)"*. Dilarang mengunggah konten yang melanggar HAKI. | `VERIFIED` | [04_ai_label_and_content_theft.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/04_ai_label_and_content_theft.md) |
+| **Label Konten AI** | Shopee Help Article 203749 & 27618 | Kutipan 203749: *"Caption dibuat menggunakan AI. Pastikan Anda meninjau kembali isi caption sebelum dipublikasikan"*. Toggle Shopee Video pada 27618 berstatus dinamis. | `VERIFIED` (Definisi 203749) / `DOCUMENTATION_ONLY` (Toggle 27618) | [04_ai_label_and_content_theft.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/04_ai_label_and_content_theft.md) |
+| **Disclosure Afiliasi Konsumen** | Shopee Help 71217, 71218, 73507 | Tidak ditemukan klausul harfiah pengungkapan hubungan afiliasi kepada audiens. | `NOT_FOUND setelah memeriksa: 71217, 71218, 73507` | [05_disclosure_and_automation_rules.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/05_disclosure_and_automation_rules.md) |
+| **Larangan Scraping / Bot** | Shopee Help Article 71217 & 71218 | Kutipan 71217: *"menggunakan robot atau alat kueri otomatis lainnya, permintaan pencarian yang dihasilkan oleh komputer;"* & 71218: *"Jangan menggunakan skrip otomatis untuk mengumpulkan informasi dari Shopee"*. | `VERIFIED` | [05_disclosure_and_automation_rules.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/05_disclosure_and_automation_rules.md) |
+| **Penggunaan Open API Resmi** | `open.shopee.com` | Penggunaan gateway resmi dengan kredensial sah diperbolehkan bagi mitra pengembang (berbeda secara hukum dan teknis dari scraping ilegal). | `DOCUMENTATION_ONLY` | [05_disclosure_and_automation_rules.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/sources/05_disclosure_and_automation_rules.md) |
 
 ---
 
@@ -169,3 +172,32 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   - File skrip `kantor.sh`, `serve-node.mjs`, atau skrip lainnya **TIDAK DIJALANKAN**.
   - Kode dianalisis secara *read-only* murni untuk mengekstrak skema JSON dan mekanisme pembacaan transkrip.
   - Laporan lengkap diterbitkan di [docs/VIZ_FEASIBILITY.md](file:///d:/Khadabra/Kerjaan%20gua/affiliate/docs/VIZ_FEASIBILITY.md).
+
+---
+
+## 6. Hasil Pengujian Suite Unit Test Lengkap Termasuk Context Pack (Fase H0)
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal Mentah:**
+  ```text
+  test_generate_context_pack (test_context_pack.TestContextPackGenerator.test_generate_context_pack) ... ok
+  test_claim_without_source_is_unverified (test_core.TestAffiliateFactoryCore.test_claim_without_source_is_unverified) ... ok
+  test_draft_with_prohibited_claim_fails_with_correct_rule_id (test_core.TestAffiliateFactoryCore.test_draft_with_prohibited_claim_fails_with_correct_rule_id) ... ok
+  test_draft_without_disclosure_fails_compliance (test_core.TestAffiliateFactoryCore.test_draft_without_disclosure_fails_compliance) ... ok
+  test_duplicate_product_url_does_not_duplicate (test_core.TestAffiliateFactoryCore.test_duplicate_product_url_does_not_duplicate) ... ok
+  test_orchestrator_run_twice_idempotence (test_core.TestAffiliateFactoryCore.test_orchestrator_run_twice_idempotence) ... ok
+  test_performance_record_unknown_fields_remain_none (test_core.TestAffiliateFactoryCore.test_performance_record_unknown_fields_remain_none) ... ok
+  test_valid_draft_passes_compliance (test_core.TestAffiliateFactoryCore.test_valid_draft_passes_compliance) ... ok
+
+  ----------------------------------------------------------------------
+  Ran 8 tests in 0.058s
+
+  OK
+  ```
+- **Kesimpulan:** Seluruh 8 test case berhasil diverifikasi lolos (`OK`). `test_generate_context_pack` memvalidasi bahwa `tools/make_context_pack.py` menghasilkan berkas konsolidasi `output/context_pack.md` yang memuat seluruh judul bagian dengan format tepat.

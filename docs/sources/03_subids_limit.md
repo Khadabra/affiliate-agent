@@ -1,10 +1,9 @@
 # SUMBER 03: BATASAN SUBIDS PADA GENERATESHORTLINK
 
-- **Klaim yang Diperiksa:** Berapa batas maksimal parameter `subIds` yang didukung oleh mutasi `generateShortLink`?
-- **Status Verifikasi:** `DOCUMENTATION_ONLY`.
-- **URL Sumber:** `https://affiliateshopee.com.br/` (Dokumentasi mutasi GraphQL `generateShortLink`)
-- **Tanggal Akses:** 2026-11-02
-- **Kutipan Pendek (Maksimal 15 Kata):**
-  > *"subIds array parameter accepts up to a maximum of five tracking values"*
-- **Catatan & Fakta Aktual:**
-  Parameter input pada mutasi GraphQL adalah `subIds: [String]`. Dokumentasi menetapkan maksimal 5 sub-ID (indeks 0 hingga 4, atau `sub_id_1` sampai `sub_id_5`) untuk tujuan pelacakan UTM/sumber traffic internal. Melebihi 5 sub-ID akan menghasilkan pesan error validasi input GraphQL.
+- **Klaim yang Diperiksa:** Apakah parameter `subIds` pada mutasi `generateShortLink` memiliki batas maksimal 5 nilai tracking?
+- **Status Verifikasi:** `NOT_VERIFIED`
+- **URL Sumber yang Diperiksa:** `https://affiliateshopee.com.br/`
+- **Metode Pengambilan:** HTTP GET via Python `urllib.request` pada 2026-11-02 (Status respons: 200, panjang HTML: 36.494 byte).
+- **Temuan Aktual di Halaman:**
+  - Pencarian string `subids` pada HTML halaman tersebut menghasilkan `False` (0 kecocokan).
+  - Kutipan batas 5 sub-ID tidak tertulis secara harfiah pada halaman publik tersebut. Informasi mengenai batasan 5 elemen pada array `subIds: [String]` bersumber dari cuplikan diskusi teknis eksternal, bukan dari teks eksplisit yang dapat dibaca pada halaman resmi yang dibuka.
