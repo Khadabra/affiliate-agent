@@ -44,7 +44,11 @@ Dokumen ini mencatat seluruh perintah pengujian, output aktual, bukti empiris di
   - `annotated-types==0.8.0`
   - `typing-extensions==4.16.0`
   - `typing-inspection==0.4.4`
-- **Perintah Pengujian Model:**
+- **Catatan Kegagalan Uji Pertama (SyntaxError):**
+  - Perintah awal: `.venv\Scripts\python.exe -c "import pydantic; from pydantic import BaseModel; print('PYDANTIC_VERSION:', pydantic.__version__); class Product(BaseModel): id: int; name: str; price: float; p = Product(id=1, name='Test Produk', price=99000.0); print('MODEL_DUMP:', p.model_dump()); print('SUCCESS')"`
+  - Exit Code: `1`
+  - Penyebab: Parser Python melarang *compound statement* (`class`, `def`) digabungkan dengan titik koma (`;`) dalam satu baris ekspresi `-c`.
+- **Perintah Pengujian Model Ulang (Berhasil):**
   ```powershell
   .venv\Scripts\python.exe -c "import pydantic; from pydantic import BaseModel`nclass Product(BaseModel):`n    id: int`n    name: str`n    price: float`np = Product(id=1, name='Test Produk', price=99000.0)`nprint('PYDANTIC_VERSION:', pydantic.__version__)`nprint('MODEL_DUMP:', p.model_dump())`nprint('TEST_RESULT: PASS')"
   ```
@@ -66,7 +70,7 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   ffmpeg -y -f lavfi -i testsrc=size=1080x1920:rate=30 -t 5 -c:v libx264 -pix_fmt yuv420p tmp/test_libx264.mp4
   ```
 - **Exit Code:** `0`
-- **Waktu Eksekusi:** `1.641 ms` (~1.64 detik)
+- **Waktu Eksekusi:** `1641 ms` (~1,64 detik) [Koreksi: 1641 milidetik, bukan 1.641 milidetik]
 - **Verifikasi ffprobe:**
   ```json
   {
