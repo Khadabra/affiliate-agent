@@ -338,6 +338,61 @@ class Database:
             if self._conn_str != ":memory:":
                 conn.close()
 
+    def get_drafts_by_id(self, draft_id: str) -> list[ContentDraft]:
+        """Retrieve all prompt versions of a draft by its ID."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM content_drafts WHERE id = ? ORDER BY prompt_version ASC",
+                (draft_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                ContentDraft(
+                    id=row["id"],
+                    product_id=row["product_id"],
+                    angle=row["angle"],
+                    hook=row["hook"],
+                    script=row["script"],
+                    caption=row["caption"],
+                    cta=row["cta"],
+                    disclosure_text=row["disclosure_text"],
+                    status=row["status"],
+                    prompt_version=row["prompt_version"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def list_all_drafts(self) -> list[ContentDraft]:
+        """List all drafts in the database across all versions."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.execute("SELECT * FROM content_drafts ORDER BY id ASC, prompt_version ASC")
+            rows = cursor.fetchall()
+            return [
+                ContentDraft(
+                    id=row["id"],
+                    product_id=row["product_id"],
+                    angle=row["angle"],
+                    hook=row["hook"],
+                    script=row["script"],
+                    caption=row["caption"],
+                    cta=row["cta"],
+                    disclosure_text=row["disclosure_text"],
+                    status=row["status"],
+                    prompt_version=row["prompt_version"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
     # --- Compliance Operations ---
     def save_compliance_report(self, report: ComplianceReport) -> None:
         conn = self.get_connection()

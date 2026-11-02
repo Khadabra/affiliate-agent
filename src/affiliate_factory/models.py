@@ -174,4 +174,95 @@ class PerformanceCorrectionPayload(BaseModel):
     reason: str
     before: PerformanceSnapshotState
     after: PerformanceSnapshotState
+class AnglePerformanceMetrics(BaseModel):
+    """Aggregated performance metrics for a specific content angle."""
+    model_config = ConfigDict(extra="forbid")
 
+    angle: str
+    total_contents: int
+    total_snapshots: int
+    total_views: int | None = None
+    total_clicks: int | None = None
+    total_orders: int | None = None
+    total_commission_idr: float | None = None
+    views_known_count: int = 0
+    views_unknown_count: int = 0
+    clicks_known_count: int = 0
+    clicks_unknown_count: int = 0
+    orders_known_count: int = 0
+    orders_unknown_count: int = 0
+    commission_known_count: int = 0
+    commission_unknown_count: int = 0
+    ctr_cohort_count: int = 0
+    ctr_views_cohort: int = 0
+    ctr_clicks_cohort: int = 0
+    ctr: float | None = None
+    cr_cohort_count: int = 0
+    cr_clicks_cohort: int = 0
+    cr_orders_cohort: int = 0
+    click_to_order: float | None = None
+    confidence_label: Literal["BUKTI CUKUP", "BUKTI TERBATAS", "TIDAK ADA DATA"]
+    data_quality_note: str
+
+
+class AngleRankItem(BaseModel):
+    """Ranked angle item with positional rank and metrics."""
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int | None = None  # None for unranked (e.g. no performance data)
+    metrics: AnglePerformanceMetrics
+
+
+class UnmappedContentItem(BaseModel):
+    """Details of a content item that could not be mapped to an angle."""
+    model_config = ConfigDict(extra="forbid")
+
+    content_id: str
+    platform: str
+    latest_snapshot_id: str | None = None
+    reason: str  # e.g. "draft_not_found", "ambiguous_prompt_version"
+
+
+class AngleRankReport(BaseModel):
+    """Full ranking report across angles for a platform or filter window."""
+    model_config = ConfigDict(extra="forbid")
+
+    platform: str | None = None
+    product_id: str | None = None
+    min_samples: int
+    sort_by: str
+    total_independent_contents: int
+    mapped_contents_count: int
+    unmapped_contents_count: int
+    ranked_angles: list[AngleRankItem] = Field(default_factory=list)
+    unranked_angles: list[AngleRankItem] = Field(default_factory=list)
+    unmapped_items: list[UnmappedContentItem] = Field(default_factory=list)
+    is_cross_platform: bool = False
+
+
+class CopywritingRecommendation(BaseModel):
+    """Actionable recommendation for an angle or copywriting strategy."""
+    model_config = ConfigDict(extra="forbid")
+
+    category: Literal[
+        "promote_tested_angle",
+        "explore_insufficient_data",
+        "funnel_gap_high_ctr_low_cr",
+        "untested_angle",
+        "data_hygiene",
+    ]
+    angle: str | None = None
+    headline: str
+    observation: str
+    actionable_advice: str
+    hypothesis_text_suggestions: list[str] = Field(default_factory=list)
+    evidence_strength: Literal["BUKTI CUKUP", "BUKTI TERBATAS", "TIDAK ADA DATA"]
+
+
+class CopywritingAdviceReport(BaseModel):
+    """Complete copywriting advisory report generated from an AngleRankReport."""
+    model_config = ConfigDict(extra="forbid")
+
+    platform: str | None = None
+    recommendations: list[CopywritingRecommendation] = Field(default_factory=list)
+    disclaimers: list[str] = Field(default_factory=list)

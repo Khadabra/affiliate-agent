@@ -25,6 +25,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from affiliate_factory.advisor import CopywritingAdvisor
+from affiliate_factory.angle_ranker import AngleRanker
 from affiliate_factory.analytics import (
     calculate_conversion_rates,
     calculate_performance_summary,
@@ -715,6 +717,129 @@ def cmd_performance_correct(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_performance_angles(args: argparse.Namespace) -> int:
+    """Rank performance by angle and display CopywritingAdvisor guidance."""
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = Database(db_path)
+    ranker = AngleRanker(db)
+    advisor = CopywritingAdvisor()
+
+    # Determine platforms to evaluate
+    if args.platform:
+        platforms = [args.platform.strip()]
+        cross_platform = False
+    elif args.all_platforms:
+        platforms = [None]
+        cross_platform = True
+    else:
+        # Separate by platform by default
+        conn = db.get_connection()
+        try:
+            cursor = conn.execute("SELECT DISTINCT platform FROM performance_records ORDER BY platform ASC")
+            platforms = [row["platform"] for row in cursor.fetchall()]
+        finally:
+            if db._conn_str != ":memory:":
+                conn.close()
+
+        if not platforms:
+            print("Belum ada data performa tercatat di database.")
+            return 0
+        cross_platform = False
+
+    for idx, plat in enumerate(platforms):
+        if idx > 0:
+            print("\n" + "=" * 60 + "\n")
+
+        try:
+            report = ranker.rank_angles(
+                platform=plat,
+                product_id=args.product_id,
+                min_samples=args.min_samples,
+                sort_by=args.sort_by,
+                allow_cross_platform=cross_platform,
+            )
+        except Exception as e:
+            print(f"[ERROR] Gagal memproses ranking angle: {e}", file=sys.stderr)
+            return 1
+
+        advice = advisor.advise(report)
+
+        plat_label = plat if plat else ("LINTAS SEMUA PLATFORM" if cross_platform else "DEFAULT")
+        print("\n============================================================")
+        print("=== PEMERINGKATAN ANGLE KONTEN & COPYWRITING ADVISOR ===")
+        print("============================================================")
+        print(f"> Platform        : {plat_label}")
+        if cross_platform:
+            print("> [PERINGATAN] Data digabungkan lintas seluruh platform. Pola audiens dan format konten antarplatform dapat berbeda secara signifikan.")
+        if args.product_id:
+            print(f"> Filter Produk   : {args.product_id}")
+        print(f"> Batas Sampel    : Minimal {args.min_samples} konten independen")
+        print(f"> Kriteria Sort   : {args.sort_by}")
+
+        print("\n--- STATUS CAKUPAN DATA ---")
+        print(f"Total Konten Independen : {report.total_independent_contents}")
+        print(f"Konten Berhasil Dipetakan: {report.mapped_contents_count}")
+        print(f"Konten Tidak Terpetakan  : {report.unmapped_contents_count}")
+
+        print("\n--- TABEL PERINGKAT ANGLE ---")
+        if not report.ranked_angles:
+            print("Tidak ada angle yang memenuhi syarat dengan data performa.")
+        else:
+            for item in report.ranked_angles:
+                m = item.metrics
+                v_str = f"{m.total_views:,}" if m.total_views is not None else "-"
+                c_str = f"{m.total_clicks:,}" if m.total_clicks is not None else "-"
+                o_str = f"{m.total_orders:,}" if m.total_orders is not None else "-"
+                comm_str = f"Rp {m.total_commission_idr:,.0f}" if m.total_commission_idr is not None else "-"
+                ctr_str = f"{m.ctr:.2f}%" if m.ctr is not None else "N/A"
+                cr_str = f"{m.click_to_order:.2f}%" if m.click_to_order is not None else "N/A"
+
+                print(f"\n[#{item.rank}] Angle: {m.angle}")
+                print(f"     Status Bukti     : {m.confidence_label} ({m.total_contents} konten {'=' if m.total_contents == report.min_samples else ('>=' if m.total_contents > report.min_samples else '<')} {report.min_samples})")
+                print(f"     Konten Independen: {m.total_contents} konten ({m.total_snapshots} snapshot observasi)")
+                print(f"     Tayangan (Views) : {v_str}")
+                print(f"     Klik Tautan      : {c_str} (CTR: {ctr_str})")
+                print(f"     Pesanan          : {o_str} (Click-to-Order: {cr_str})")
+                print(f"     Total Komisi     : {comm_str}")
+                print(f"     Catatan Kualitas : {m.data_quality_note}")
+
+        if report.unranked_angles:
+            print("\n--- ANGLE TANPA DATA PERFORMA ---")
+            for item in report.unranked_angles:
+                m = item.metrics
+                print(f"[-] Angle: {m.angle}")
+                print(f"    Status Bukti     : {m.confidence_label}")
+                print(f"    Catatan Kualitas : {m.data_quality_note}")
+
+        if report.unmapped_items:
+            print("\n--- DATA TIDAK TERPETAKAN (EXCLUDED DARI RANKING) ---")
+            for u in report.unmapped_items:
+                snap_info = f" (Snapshot: {u.latest_snapshot_id})" if u.latest_snapshot_id else ""
+                print(f"* Content ID: {u.content_id} [{u.platform}]{snap_info} - Alasan: {u.reason}")
+
+        print("\n============================================================")
+        print("=== REKOMENDASI COPYWRITING ADVISOR ===")
+        print("============================================================")
+        for idx_rec, rec in enumerate(advice.recommendations, start=1):
+            angle_hdr = f" - Angle: {rec.angle}" if rec.angle else ""
+            print(f"\n[REKOMENDASI {idx_rec}] {rec.headline}{angle_hdr}")
+            print(f"- Status Bukti   : {rec.evidence_strength}")
+            print(f"- Observasi Data : {rec.observation}")
+            print(f"- Saran Tindakan : {rec.actionable_advice}")
+            if rec.hypothesis_text_suggestions:
+                print("- Hipotesis Naskah (Draft):")
+                for draft_sugg in rec.hypothesis_text_suggestions:
+                    print(f"  * {draft_sugg}")
+
+        print("\n============================================================")
+        print("=== CATATAN KEPATUHAN & BATASAN AUDIT ===")
+        print("============================================================")
+        for disc in advice.disclaimers:
+            print(f"> {disc}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -845,6 +970,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_correct.add_argument("--note", help="Alasan koreksi snapshot.")
     p_correct.add_argument("--db", help="Path ke SQLite database.")
     p_correct.set_defaults(func=cmd_performance_correct)
+
+    # 7e. performance angles
+    p_angles = perf_subparsers.add_parser("angles", help="Pemeringkatan angle performa & rekomendasi CopywritingAdvisor.")
+    p_angles.add_argument("--platform", help="Filter berdasarkan platform tertentu (misal: 'Shopee Video').")
+    p_angles.add_argument("--product-id", help="Filter berdasarkan ID produk tertentu (opsional).")
+    p_angles.add_argument("--min-samples", type=int, default=3, help="Batas minimum sampel konten untuk bukti cukup (default: 3).")
+    p_angles.add_argument(
+        "--sort-by",
+        choices=["click_to_order", "ctr", "commission", "orders", "views"],
+        default="click_to_order",
+        help="Kriteria utama pengurutan peringkat (default: click_to_order).",
+    )
+    p_angles.add_argument(
+        "--all-platforms",
+        action="store_true",
+        help="Gabungkan metrik lintas platform secara eksplisit (default: terpisah).",
+    )
+    p_angles.add_argument("--db", help="Path ke SQLite database.")
+    p_angles.set_defaults(func=cmd_performance_angles)
 
     return parser
 

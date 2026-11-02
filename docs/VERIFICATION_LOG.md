@@ -401,3 +401,36 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   4. `test_invalid_correction_input_rejected_without_data_change`: Input koreksi yang tidak valid (misal nilai tayangan negatif) ditolak pada validasi model tanpa mengubah data snapshot dan tanpa menulis event audit (`PASS`).
   5. `test_sequential_repeated_corrections_auditable`: Koreksi berulang pada snapshot yang sama dapat ditelusuri secara berurutan (*sequential lineage*) melalui riwayat event audit `correct_snapshot` (`PASS`).
   6. `test_correction_and_audit_consistent_across_db_reopen`: Konsistensi data snapshot dan event audit terverifikasi tetap utuh setelah koneksi database ditutup dan dibuka kembali dari berkas SQLite (`PASS`).
+---
+
+## 13. Verifikasi Phase 2.2: Angle Ranker & Copywriting Advisor
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 86 tests in 2.866s
+
+  OK
+  ```
+- **Rincian Pengujian Baru (15 Test Cases pada `tests/test_angle_ranker.py`):**
+  1. `test_aggregate_ctr_weighted_sum_clicks_and_views`: Perhitungan CTR agregat berbobot dari total clicks dan total views pada cohort yang valid (`(150 / 3000) * 100 = 5.0%`) (`PASS`).
+  2. `test_aggregate_click_to_order_weighted_sum_orders_and_clicks`: Perhitungan Click-to-Order berbobot dari total orders dan total clicks pada cohort yang valid (`(15 / 150) * 100 = 10.0%`) (`PASS`).
+  3. `test_none_metrics_preserved_never_defaulted_to_zero`: Preservasi nilai `None` pada metrik yang tidak diukur tanpa disulap menjadi 0 (`PASS`).
+  4. `test_zero_denominator_yields_na_ratio`: Penyebut nol menghasilkan nilai rasio `None` (`N/A`) tanpa ZeroDivisionError atau persentase palsu (`PASS`).
+  5. `test_cumulative_snapshots_not_counted_as_multiple_independent_contents`: Deduplikasi snapshot kumulatif hanya mengambil snapshot terbaru per konten independen; tidak terjadi penjumlahan ganda (`PASS`).
+  6. `test_angle_without_performance_does_not_get_fake_rank`: Angle di repositori draf yang belum memiliki catatan performa dipisahkan dengan `rank=None` dan status `TIDAK ADA DATA`, mencegah ranking palsu (`PASS`).
+  7. `test_unfound_draft_excluded_from_ranking`: Record performa dengan draft ID yang tidak ditemukan dikategorikan sebagai unmapped dan dieksklusikan dari ranking angle (`PASS`).
+  8. `test_ambiguous_prompt_versions_excluded_from_ranking`: Draft ID yang memiliki versi prompt ganda (>1 versi) ditandai ambigu dan dieksklusikan dari ranking angle (`PASS`).
+  9. `test_cross_platform_data_separated_by_default`: Data lintas platform ditolak bercampur secara default (`ValueError`) kecuali `allow_cross_platform=True` diaktifkan secara eksplisit (`PASS`).
+  10. `test_platform_filter_works_correctly`: Parameter filter platform (`--platform`) mengisolasi evaluasi hanya pada platform target (`PASS`).
+  11. `test_small_sample_labeled_limited_evidence`: Angle dengan sampel konten di bawah batas minimum (`< min_samples`) secara tegas diberi label `BUKTI TERBATAS` (`PASS`).
+  12. `test_deterministic_ranking_for_identical_inputs`: Pemeringkatan bersifat 100% deterministik untuk dataset input yang sama (`PASS`).
+  13. `test_copywriting_advisor_aligns_with_metrics`: Rekomendasi CopywritingAdvisor menyertakan observasi data yang persis merujuk metrik empiris sumber tanpa fabrikasi (`PASS`).
+  14. `test_insufficient_data_recommends_exploration_not_winner`: Ketika seluruh data bersampel kecil, advisor merekomendasikan eksplorasi sampel tambahan dan menolak mengklaim angle pemenang (`PASS`).
+  15. `test_cli_performance_angles_smoke`: Smoke test subperintah CLI `performance angles` berjalan sempurna dengan exit code 0 (`PASS`).
