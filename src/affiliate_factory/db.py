@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,9 @@ from affiliate_factory.models import (
     ComplianceReport,
     ContentDraft,
     Event,
+    PerformanceCorrectionPayload,
     PerformanceRecord,
+    PerformanceSnapshotState,
     Product,
 )
 
@@ -657,6 +660,172 @@ class Database:
         finally:
             if self._conn_str != ":memory:":
                 conn.close()
+
+    def correct_performance_record(
+        self,
+        record_id: str,
+        updated_record: PerformanceRecord,
+        reason: str | None = None,
+        run_id: str | None = None,
+    ) -> Event:
+        """Atomically correct an existing performance snapshot and record an audit event.
+
+        Invariants:
+        1. Snapshot update and audit log insertion occur within the exact same SQLite transaction.
+        2. Full representations of before and after states are saved in the audit event.
+        3. If snapshot does not exist, raises ValueError without creating an audit event.
+        4. If audit event creation or insertion fails, the entire transaction rolls back.
+        """
+        conn = self.get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "SELECT * FROM performance_records WHERE id = ?",
+                    (record_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError(
+                        f"Snapshot performa dengan ID '{record_id}' tidak ditemukan di database."
+                    )
+
+                before_state = PerformanceSnapshotState(
+                    id=row["id"],
+                    content_id=row["content_id"],
+                    platform=row["platform"],
+                    observed_at=row["observed_at"],
+                    views=row["views"],
+                    clicks=row["clicks"],
+                    orders=row["orders"],
+                    commission_idr=row["commission_idr"],
+                    data_source=row["data_source"],
+                )
+
+                after_state = PerformanceSnapshotState(
+                    id=updated_record.id or record_id,
+                    content_id=updated_record.content_id,
+                    platform=updated_record.platform,
+                    observed_at=updated_record.observed_at.isoformat(),
+                    views=updated_record.views,
+                    clicks=updated_record.clicks,
+                    orders=updated_record.orders,
+                    commission_idr=updated_record.commission_idr,
+                    data_source=updated_record.data_source,
+                )
+
+                conn.execute(
+                    """
+                    UPDATE performance_records SET
+                        content_id = ?,
+                        platform = ?,
+                        observed_at = ?,
+                        views = ?,
+                        clicks = ?,
+                        orders = ?,
+                        commission_idr = ?,
+                        data_source = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        after_state.content_id,
+                        after_state.platform,
+                        after_state.observed_at,
+                        after_state.views,
+                        after_state.clicks,
+                        after_state.orders,
+                        after_state.commission_idr,
+                        after_state.data_source,
+                        record_id,
+                    ),
+                )
+
+                payload = PerformanceCorrectionPayload(
+                    record_id=record_id,
+                    reason=(reason or "").strip(),
+                    before=before_state,
+                    after=after_state,
+                )
+
+                event = Event(
+                    id=str(uuid.uuid4()),
+                    ts=datetime.now(timezone.utc),
+                    run_id=run_id or str(uuid.uuid4()),
+                    module="performance",
+                    action="correct_snapshot",
+                    status="succeeded",
+                    ref_type="performance_record",
+                    ref_id=record_id,
+                    note=payload.model_dump_json(),
+                )
+
+                conn.execute(
+                    """
+                    INSERT INTO events (id, ts, run_id, module, action, status, ref_type, ref_id, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.id,
+                        event.ts.isoformat(),
+                        event.run_id,
+                        event.module,
+                        event.action,
+                        event.status,
+                        event.ref_type,
+                        event.ref_id,
+                        event.note,
+                    ),
+                )
+                return event
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def list_correction_events(self, record_id: str | None = None) -> list[Event]:
+        """List correction audit events, optionally filtered by snapshot record_id."""
+        conn = self.get_connection()
+        try:
+            if record_id:
+                cursor = conn.execute(
+                    """
+                    SELECT * FROM events
+                    WHERE module = 'performance' AND action = 'correct_snapshot' AND ref_id = ?
+                    ORDER BY ts ASC
+                    """,
+                    (record_id,),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    SELECT * FROM events
+                    WHERE module = 'performance' AND action = 'correct_snapshot'
+                    ORDER BY ts ASC
+                    """
+                )
+            rows = cursor.fetchall()
+            return [
+                Event(
+                    id=row["id"],
+                    ts=datetime.fromisoformat(row["ts"]),
+                    run_id=row["run_id"],
+                    module=row["module"],
+                    action=row["action"],
+                    status=row["status"],
+                    ref_type=row["ref_type"],
+                    ref_id=row["ref_id"],
+                    note=row["note"],
+                )
+                for row in rows
+            ]
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    @staticmethod
+    def parse_correction_payload(event: Event) -> PerformanceCorrectionPayload:
+        """Parse structured correction payload from an audit event."""
+        if not event.note:
+            raise ValueError(f"Event '{event.id}' has empty note")
+        return PerformanceCorrectionPayload.model_validate_json(event.note)
 
     # --- Event Log Operations (Append-Only) ---
     def append_event(self, event: Event) -> None:

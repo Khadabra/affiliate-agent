@@ -377,3 +377,27 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   9. `test_summary_period_delta`: Perhitungan delta pertumbuhan metrik (tayangan, klik, pesanan, komisi) antar-snapshot dalam jendela filter observasi berjalan akurat (`PASS`).
   10. `test_cli_performance_correct_smoke`: Pengujian smoke test subperintah CLI baru `performance correct` untuk pembaruan snapshot eksplisit dengan pencatatan audit log `action="correct_snapshot"` (`PASS`).
   11. `test_cli_duplicate_record_id_fails_without_audit_event`: Kegagalan pencatatan snapshot via CLI akibat duplikasi ID mengembalikan exit code 1 dan tidak memicu pembuatan audit event sukses palsu (`PASS`).
+---
+
+## 12. Verifikasi Phase 2.1.1: Performance Correction Auditability
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 71 tests in 2.571s
+
+  OK
+  ```
+- **Rincian Pengujian & Perbaikan Auditability (6 Test Cases Baru pada `tests/test_performance.py`):**
+  1. `test_correction_saves_complete_before_and_after_states`: Koreksi snapshot performa secara transaksional menyimpan representasi lengkap seluruh nilai sebelum (`before`) dan sesudah (`after`) beserta alasan dan identitas snapshot pada payload event audit `note` (`PASS`).
+  2. `test_audit_failure_rolls_back_snapshot_correction`: Jika pencatatan event audit gagal (disimulasikan dengan operational error pada SQLite), seluruh transaksi dibatalkan (`ROLLBACK`). Snapshot di database tetap pada kondisi sebelum koreksi dan tidak ditinggalkan tanpa jejak audit (`PASS`).
+  3. `test_missing_snapshot_id_rejected_without_event`: Snapshot ID yang tidak ditemukan ditolak tegas (`ValueError`) dan tidak memicu pembuatan event audit sukses palsu (`PASS`).
+  4. `test_invalid_correction_input_rejected_without_data_change`: Input koreksi yang tidak valid (misal nilai tayangan negatif) ditolak pada validasi model tanpa mengubah data snapshot dan tanpa menulis event audit (`PASS`).
+  5. `test_sequential_repeated_corrections_auditable`: Koreksi berulang pada snapshot yang sama dapat ditelusuri secara berurutan (*sequential lineage*) melalui riwayat event audit `correct_snapshot` (`PASS`).
+  6. `test_correction_and_audit_consistent_across_db_reopen`: Konsistensi data snapshot dan event audit terverifikasi tetap utuh setelah koneksi database ditutup dan dibuka kembali dari berkas SQLite (`PASS`).

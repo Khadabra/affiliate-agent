@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -645,6 +646,250 @@ class TestPerformanceTracking(unittest.TestCase):
         # No new audit event should have been logged for the failed record
         events_after = len([e for e in self.db.list_events() if e.module == "performance"])
         self.assertEqual(events_before, events_after)
+
+
+    # 22. Phase 2.1.1: Complete before and after audit trail for snapshot corrections
+    def test_correction_saves_complete_before_and_after_states(self) -> None:
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        record = PerformanceRecord(
+            content_id="draft_perf_01",
+            platform="Shopee Video",
+            observed_at=t0,
+            views=100,
+            clicks=10,
+            orders=1,
+            commission_idr=5000.0,
+            data_source="manual",
+        )
+        self.db.save_performance_record("snap_audit_01", record)
+
+        updated_record = PerformanceRecord(
+            content_id="draft_perf_01",
+            platform="Shopee Video",
+            observed_at=t0,
+            views=150,
+            clicks=15,
+            orders=2,
+            commission_idr=8000.0,
+            data_source="manual",
+        )
+        event = self.db.correct_performance_record(
+            record_id="snap_audit_01",
+            updated_record=updated_record,
+            reason="Fix undercounted metrics",
+        )
+
+        self.assertEqual(event.module, "performance")
+        self.assertEqual(event.action, "correct_snapshot")
+        self.assertEqual(event.ref_type, "performance_record")
+        self.assertEqual(event.ref_id, "snap_audit_01")
+
+        # Parse structured correction payload
+        payload = Database.parse_correction_payload(event)
+        self.assertEqual(payload.record_id, "snap_audit_01")
+        self.assertEqual(payload.reason, "Fix undercounted metrics")
+
+        # Verify full BEFORE state
+        self.assertEqual(payload.before.id, "snap_audit_01")
+        self.assertEqual(payload.before.content_id, "draft_perf_01")
+        self.assertEqual(payload.before.platform, "Shopee Video")
+        self.assertEqual(payload.before.views, 100)
+        self.assertEqual(payload.before.clicks, 10)
+        self.assertEqual(payload.before.orders, 1)
+        self.assertEqual(payload.before.commission_idr, 5000.0)
+        self.assertEqual(payload.before.data_source, "manual")
+
+        # Verify full AFTER state
+        self.assertEqual(payload.after.id, "snap_audit_01")
+        self.assertEqual(payload.after.content_id, "draft_perf_01")
+        self.assertEqual(payload.after.platform, "Shopee Video")
+        self.assertEqual(payload.after.views, 150)
+        self.assertEqual(payload.after.clicks, 15)
+        self.assertEqual(payload.after.orders, 2)
+        self.assertEqual(payload.after.commission_idr, 8000.0)
+        self.assertEqual(payload.after.data_source, "manual")
+
+    # 23. Phase 2.1.1: Audit failure rolls back snapshot update atomically
+    def test_audit_failure_rolls_back_snapshot_correction(self) -> None:
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        record = PerformanceRecord(
+            content_id="draft_perf_01",
+            platform="Shopee Video",
+            observed_at=t0,
+            views=100,
+            clicks=10,
+        )
+        self.db.save_performance_record("snap_rollback_test", record)
+
+        updated_record = PerformanceRecord(
+            content_id="draft_perf_01",
+            platform="Shopee Video",
+            observed_at=t0,
+            views=250,
+            clicks=25,
+        )
+
+        # Monkeypatch the DB's connection execute to fail specifically when inserting the event
+        orig_get_connection = self.db.get_connection
+
+        class FailingConnection:
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def __enter__(self):
+                return self._real.__enter__()
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return self._real.__exit__(exc_type, exc_val, exc_tb)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, params=()):
+                if "INSERT INTO events" in sql:
+                    raise sqlite3.OperationalError("Simulated event disk failure during audit logging")
+                return self._real.execute(sql, params)
+
+        def mock_get_conn():
+            real_conn = orig_get_connection()
+            return FailingConnection(real_conn)
+
+        self.db.get_connection = mock_get_conn
+
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.db.correct_performance_record(
+                    record_id="snap_rollback_test",
+                    updated_record=updated_record,
+                    reason="Should fail and rollback",
+                )
+        finally:
+            self.db.get_connection = orig_get_connection
+
+        # Crucial: verify that the snapshot remains in its pre-correction state (views=100, NOT 250)
+        current = self.db.get_performance_record("snap_rollback_test")
+        self.assertIsNotNone(current)
+        self.assertEqual(current.views, 100)
+        self.assertEqual(current.clicks, 10)
+
+        # Verify no audit event was saved for this record
+        corr_events = self.db.list_correction_events("snap_rollback_test")
+        self.assertEqual(len(corr_events), 0)
+
+    # 24. Phase 2.1.1: Missing snapshot ID rejected without creating audit event
+    def test_missing_snapshot_id_rejected_without_event(self) -> None:
+        updated = PerformanceRecord(
+            content_id="draft_perf_01",
+            platform="Shopee Video",
+            views=300,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.db.correct_performance_record(
+                record_id="non_existent_snapshot_id",
+                updated_record=updated,
+                reason="Should fail",
+            )
+        self.assertIn("tidak ditemukan di database", str(ctx.exception))
+
+        events = self.db.list_correction_events("non_existent_snapshot_id")
+        self.assertEqual(len(events), 0)
+
+    # 25. Phase 2.1.1: CLI invalid correction input rejected without data change
+    def test_invalid_correction_input_rejected_without_data_change(self) -> None:
+        # Create initial snapshot
+        self.db.save_performance_record(
+            "snap_valid_01",
+            PerformanceRecord(content_id="draft_perf_01", platform="Shopee Video", views=200, clicks=20),
+        )
+
+        # Run CLI with negative views
+        code_neg = main([
+            "performance",
+            "correct",
+            "--record-id",
+            "snap_valid_01",
+            "--views",
+            "-50",
+            "--db",
+            str(self.db_path),
+        ])
+        self.assertEqual(code_neg, 1)
+
+        # Verify data unchanged
+        snap = self.db.get_performance_record("snap_valid_01")
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap.views, 200)
+        self.assertEqual(snap.clicks, 20)
+
+        # Verify no audit event was emitted
+        events = self.db.list_correction_events("snap_valid_01")
+        self.assertEqual(len(events), 0)
+
+    # 26. Phase 2.1.1: Sequential repeated corrections auditable in order
+    def test_sequential_repeated_corrections_auditable(self) -> None:
+        t0 = datetime(2026, 11, 2, 8, 0, 0, tzinfo=timezone.utc)
+        self.db.save_performance_record(
+            "snap_seq_01",
+            PerformanceRecord(content_id="draft_perf_01", platform="Shopee Video", observed_at=t0, views=100, clicks=5),
+        )
+
+        # Correction 1
+        r1 = PerformanceRecord(content_id="draft_perf_01", platform="Shopee Video", observed_at=t0, views=120, clicks=8)
+        self.db.correct_performance_record("snap_seq_01", r1, reason="First revision: add delayed clicks")
+
+        # Correction 2
+        r2 = PerformanceRecord(content_id="draft_perf_01", platform="Shopee Video", observed_at=t0, views=140, clicks=10)
+        self.db.correct_performance_record("snap_seq_01", r2, reason="Second revision: official dashboard sync")
+
+        # Current snapshot state
+        latest = self.db.get_performance_record("snap_seq_01")
+        self.assertEqual(latest.views, 140)
+        self.assertEqual(latest.clicks, 10)
+
+        # Audit events in order
+        events = self.db.list_correction_events("snap_seq_01")
+        self.assertEqual(len(events), 2)
+
+        ev1_payload = Database.parse_correction_payload(events[0])
+        self.assertEqual(ev1_payload.before.views, 100)
+        self.assertEqual(ev1_payload.before.clicks, 5)
+        self.assertEqual(ev1_payload.after.views, 120)
+        self.assertEqual(ev1_payload.after.clicks, 8)
+        self.assertEqual(ev1_payload.reason, "First revision: add delayed clicks")
+
+        ev2_payload = Database.parse_correction_payload(events[1])
+        self.assertEqual(ev2_payload.before.views, 120)
+        self.assertEqual(ev2_payload.before.clicks, 8)
+        self.assertEqual(ev2_payload.after.views, 140)
+        self.assertEqual(ev2_payload.after.clicks, 10)
+        self.assertEqual(ev2_payload.reason, "Second revision: official dashboard sync")
+
+    # 27. Phase 2.1.1: Snapshot and audit event consistent across db close and reopen
+    def test_correction_and_audit_consistent_across_db_reopen(self) -> None:
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        self.db.save_performance_record(
+            "snap_persist_01",
+            PerformanceRecord(content_id="draft_perf_01", platform="Shopee Video", observed_at=t0, views=300),
+        )
+
+        r_updated = PerformanceRecord(
+            content_id="draft_perf_01", platform="Shopee Video", observed_at=t0, views=350, clicks=12
+        )
+        self.db.correct_performance_record("snap_persist_01", r_updated, reason="Reopen test correction")
+
+        # Close and instantiate a new Database instance pointing to the same file
+        reopened_db = Database(self.db_path)
+        persisted_record = reopened_db.get_performance_record("snap_persist_01")
+        self.assertIsNotNone(persisted_record)
+        self.assertEqual(persisted_record.views, 350)
+        self.assertEqual(persisted_record.clicks, 12)
+
+        persisted_events = reopened_db.list_correction_events("snap_persist_01")
+        self.assertEqual(len(persisted_events), 1)
+        payload = Database.parse_correction_payload(persisted_events[0])
+        self.assertEqual(payload.before.views, 300)
+        self.assertEqual(payload.after.views, 350)
+        self.assertEqual(payload.reason, "Reopen test correction")
 
 if __name__ == "__main__":
     unittest.main()

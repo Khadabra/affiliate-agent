@@ -684,28 +684,14 @@ def cmd_performance_correct(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        db.save_performance_record(existing.id, updated_record, allow_overwrite=True)
+        event = db.correct_performance_record(
+            record_id=existing.id,
+            updated_record=updated_record,
+            reason=args.note,
+        )
     except Exception as e:
         print(f"[ERROR] Gagal memperbarui snapshot: {e}", file=sys.stderr)
         return 1
-
-    db.append_event(
-        Event(
-            id=str(uuid.uuid4()),
-            ts=datetime.now(timezone.utc),
-            run_id=str(uuid.uuid4()),
-            module="performance",
-            action="correct_snapshot",
-            status="succeeded",
-            ref_type="content_id",
-            ref_id=existing.content_id,
-            note=(
-                f"Corrected snapshot {existing.id} for content '{existing.content_id}': "
-                f"views={new_views}, clicks={new_clicks}, orders={new_orders}, "
-                f"commission_idr={new_commission}. Reason: {args.note or 'Correction'}"
-            ),
-        )
-    )
 
     rates = calculate_conversion_rates(
         views=new_views,
@@ -716,6 +702,7 @@ def cmd_performance_correct(args: argparse.Namespace) -> int:
 
     print("\n[SUKSES] Snapshot performa berhasil dikoreksi.")
     print(f"Snapshot ID  : {existing.id}")
+    print(f"Audit Event  : {event.id}")
     print(f"Content ID   : {updated_record.content_id}")
     print(f"Platform     : {updated_record.platform}")
     print(f"Observed At  : {updated_record.observed_at.isoformat()}")

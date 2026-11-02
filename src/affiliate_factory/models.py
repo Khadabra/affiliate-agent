@@ -151,3 +151,27 @@ class Event(BaseModel):
     ref_id: str
     note: str | None = None
 
+class PerformanceSnapshotState(BaseModel):
+    """Immutable state representation of a performance snapshot at a point in time."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    content_id: str
+    platform: str
+    observed_at: str
+    views: int | None = None
+    clicks: int | None = None
+    orders: int | None = None
+    commission_idr: float | None = None
+    data_source: str
+
+
+class PerformanceCorrectionPayload(BaseModel):
+    """Structured audit payload for performance record corrections."""
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str
+    reason: str
+    before: PerformanceSnapshotState
+    after: PerformanceSnapshotState
+
