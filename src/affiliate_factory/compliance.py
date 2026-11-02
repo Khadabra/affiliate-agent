@@ -153,3 +153,4 @@ def check_compliance(
     db.append_event(finish_event)
 
     return report
+

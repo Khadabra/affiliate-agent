@@ -96,3 +96,4 @@ def intake_product(
     )
     db.append_event(success_event)
     return product, True
+

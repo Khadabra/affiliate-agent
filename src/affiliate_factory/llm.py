@@ -34,3 +34,4 @@ class ManualPaste(LLMAdapter):
             return self._reader(">> ")
         except EOFError:
             return ""
+

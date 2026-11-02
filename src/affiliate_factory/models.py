@@ -101,3 +101,4 @@ class Event(BaseModel):
     ref_type: str
     ref_id: str
     note: str | None = None
+

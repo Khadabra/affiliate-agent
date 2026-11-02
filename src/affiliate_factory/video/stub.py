@@ -30,3 +30,4 @@ class VideoRenderResult(BaseModel):
 def render_video_stub(request: VideoRenderRequest) -> VideoRenderResult:
     """Stub function. Rendering is deferred in Phase 1."""
     raise NotImplementedError("Video assembly is DEFERRED in Phase 1.")
+

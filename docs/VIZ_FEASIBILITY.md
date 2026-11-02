@@ -107,3 +107,4 @@ Front-end `kantor.js` menggunakan Three.js untuk memetakan setiap entitas (`ketu
 1. Prioritas proyek adalah menghasilkan konten afiliasi yang patuh, aman dari ban Shopee, dan menghasilkan konversi nyata.
 2. Pipeline fondasi (M1 & M2) telah merekam seluruh aktivitas ke tabel SQLite `events`. Dengan demikian, data historis dan status tersimpan rapi.
 3. Saat sistem inti telah stabil menghasilkan naskah dan diuji pengguna, kita dapat mengadopsi **Opsi A** (membuat adaptor JSON sederhana dari tabel `events` ke viewer visual) pada Phase 2 tanpa harus menjalankan WSL atau Claude Code.
+

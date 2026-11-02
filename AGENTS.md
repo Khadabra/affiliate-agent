@@ -1,30 +1,26 @@
-# AI Affiliate Content Factory — Workspace Operating Rules
+# AI AFFILIATE CONTENT FACTORY — OPERATING RULES
 
-> **Scope:** File ini berlaku otomatis untuk seluruh agen, subagen, dan percakapan di dalam workspace `d:\Khadabra\Kerjaan gua\affiliate`.
+## 1. Tujuan Proyek
+Sistem ini membangun AI Affiliate Content Factory semi-otomatis untuk memproduksi dan mengevaluasi konten afiliasi Shopee Indonesia berbasis modul Python deterministik. Fokus sistem adalah kegunaan nyata dengan menghasilkan draf naskah terstruktur, memeriksa kepatuhan klaim, dan mencatat performa konversi secara terukur. Seluruh alur kerja menempatkan kontrol keputusan pada manusia sebelum materi dipublikasikan.
 
----
+## 2. Aturan Keras (Hard Invariants)
+1. **Tidak Ada Scraping Shopee:** Dilarang menggunakan bot, spider, scraper headless, atau skrip otomatis pengumpul informasi terhadap antarmuka Shopee.
+2. **Tidak Ada Auto-Posting:** Tidak ada konten yang dipublikasikan atau diunggah ke platform luar tanpa persetujuan manusia eksplisit (`APPROVE`).
+3. **Tidak Ada Secret:** Dilarang keras menulis API key, token, atau password di source code, dokumen commit, atau log. Gunakan local `.env`.
+4. **Tidak Ada Dependensi Baru:** Dilarang menginstal pustaka eksternal baru tanpa persetujuan eksplisit pengguna. Gunakan hanya modul yang disetujui (`pydantic` dan pustaka bawaan Python).
 
-## 1. Aturan Mutlak Tata Kelola
+## 3. Definisi Status Bukti
+- `VERIFIED`: Fakta terbukti dari dokumen resmi yang dibuka langsung dengan kutipan persis harfiah (bahasa asli halaman).
+- `DOCUMENTATION_ONLY`: Tertulis pada dokumentasi integrasi/portal pihak ketiga, namun belum diverifikasi pada dokumen publik resmi atau kredensial aktif.
+- `NOT_VERIFIED`: Asumsi, klaim tanpa kutipan persis, atau informasi yang tidak ditemukan pada dokumen resmi.
+- `TESTED`: Telah diuji langsung pada lingkungan lokal dengan catatan perintah, exit code, dan output aktual.
 
-1. **Empirical Verification First:**
-   - Dilarang membuat kesimpulan atau klaim sebelum memeriksa file, direktori, dan konfigurasi aktual di Windows PowerShell.
-   - Klasifikasikan setiap temuan sebagai `VERIFIED`, `ASSUMPTION`, `PROPOSAL`, atau `NOT VERIFIED`.
+## 4. Definisi "Selesai" (Definition of Done)
+Suatu tugas atau modul hanya dapat dinyatakan selesai jika:
+1. Seluruh unit test terkait lolos pengujian tanpa error (`exit code 0`).
+2. Perintah pengujian, exit code, dan output aktual tercatat di `docs/VERIFICATION_LOG.md`.
+3. Seluruh perubahan berkas telah di-commit ke Git dengan pesan deskriptif.
 
-2. **No Unapproved Modifications:**
-   - Dilarang menginstal dependensi (pip/uv), mengkloning git repo, menghapus file, atau membuat akun/API berbayar tanpa persetujuan eksplisit user.
-   - Fase 0A adalah murni fase inspeksi, audit, dan tata kelola.
-
-3. **Human-in-the-Loop Publication Gate:**
-   - Tidak ada publikasi, posting, atau aksi eksternal yang dapat dieksekusi tanpa persetujuan eksplisit manusia (`APPROVE`).
-
-4. **Platform & Legal Safety:**
-   - Dilarang keras mengakali bot detection, CAPTCHA, atau mem-bypass login Shopee/e-commerce.
-   - Gunakan input terkurasi manual atau Shopee Open Platform API resmi.
-
-5. **Security & Zero-Leakage:**
-   - Dilarang menyimpan API key atau kredensial di dalam source code, dokumen markdown publik, atau log. Gunakan local `.env`.
-
-6. **Hardware Awareness (Windows 11 / RTX 4050 6GB):**
-   - Waspadai batas memori VRAM GPU (6GB). Hindari menjalankan model difusi berat atau proses berat tanpa pertimbangan VRAM.
-   - Gunakan runtime Python 3.12 via `uv` untuk memastikan kompatibilitas wheel library AI.
-
+## 5. Protokol Awal dan Akhir Sesi
+- **Awal Sesi:** Baca `docs/HANDOFF.md`, periksa status Git (`git status`), jalankan seluruh unit test untuk memastikan titik awal bersih, dan verifikasi kondisi aktual sebelum mengubah berkas.
+- **Akhir Sesi:** Jalankan seluruh unit test, perbarui `docs/VERIFICATION_LOG.md`, perbarui `docs/HANDOFF.md` (hanya satu tugas berikutnya), lalu lakukan commit ke Git sebelum berhenti.

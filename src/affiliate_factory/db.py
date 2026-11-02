@@ -459,3 +459,4 @@ class Database:
         finally:
             if self._conn_str != ":memory:":
                 conn.close()
+

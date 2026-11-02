@@ -72,3 +72,4 @@ def check_claims(
     db.append_event(finish_event)
 
     return updated_claims
+
