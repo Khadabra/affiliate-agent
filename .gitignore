@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+.env.*
+*.key
+secrets/
+
+# Virtual environment (do NOT ignore uv.lock)
+.venv/
+
+# Temporary and build artifacts
+tmp/
+__pycache__/
+*.pyc
+
+# Media outputs
+output/
+*.mp4
+*.mp3
+*.wav
+
+# SQLite databases
+*.sqlite3
+*.db
+data/*.sqlite3
+data/*.db
