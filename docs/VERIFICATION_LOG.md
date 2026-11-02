@@ -316,3 +316,34 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   7. `test_safe_overwrite_preserves_original_on_failure`: Penimpaan paket konten yang gagal di tengah proses secara otomatis memulihkan direktori asli dari cadangan sehingga berkas valid sebelumnya tidak hilang atau rusak (`PASS`).
   8. `test_symlink_target_rejection`: Upaya ekspor ke direktori target yang merupakan symlink langsung ditolak (`ValueError`) (`PASS`).
   9. `test_database_migration_claims_prompt_version`: Tabel `claims` legacy tanpa kolom `prompt_version` termigrasi secara otomatis ke skema baru; draf versi tunggal diasosiasikan secara pasti, sementara draf multiversi atau yatim dibiarkan `NULL` tanpa fabrikasi data (`PASS`).
+
+
+---
+
+## 10. Verifikasi Phase 2: Performance Tracking & Conversion Analytics
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 55 tests in 2.166s
+
+  OK
+  ```
+- **Rincian Pengujian Baru (11 Test Cases pada `tests/test_performance.py`):**
+  1. `test_record_and_retrieve_single_snapshot`: Pencatatan dan pembacaan kembali satu snapshot metrik performa (`PerformanceRecord`) dengan seluruh atribut (`views`, `clicks`, `orders`, `commission_idr`, `platform`, `observed_at`, `data_source`) tersimpan persis di SQLite (`PASS`).
+  2. `test_multiple_snapshots_retained_chronologically_no_overwrite`: Penyimpanan snapshot berulang pada konten yang sama tidak menimpa riwayat terdahulu; seluruh snapshot dipertahankan secara kronologis (`PASS`).
+  3. `test_unknown_fields_remain_none_never_defaulted_to_zero`: Bidang metrik yang tidak diketahui/tidak diukur tetap bernilai `None` dan tidak disulap menjadi 0 (`PASS`).
+  4. `test_negative_metrics_rejected`: Nilai negatif untuk tayangan, klik, pesanan, atau komisi ditolak langsung oleh validator model (`PASS`).
+  5. `test_conversion_rates_zero_and_none_denominators`: Perhitungan rasio konversi (CTR, Click-to-Order) aman dari pembagian nol (menghasilkan `None`, bukan 0.0 atau crash), dan mempertahankan nilai 0.0 jika pembilang nol namun penyebut valid (`PASS`).
+  6. `test_discrepancy_warnings_generated`: Logika bisnis mendeteksi anomali (misal: klik > tayangan atau pesanan > klik) dan menghasilkan peringatan diagnostik tanpa menolak data nyata secara kaku (`PASS`).
+  7. `test_summary_never_double_counts_cumulative_snapshots`: Agregasi ringkasan performa secara ketat mengambil snapshot terbaru untuk setiap `(content_id, platform)` dan menjumlahkan snapshot terbaru tersebut, mencegah penghitungan ganda atas metrik kumulatif (`PASS`).
+  8. `test_filter_by_content_platform_and_date_range`: Kueri database mendukung filter berdasarkan `content_id`, `platform`, serta rentang waktu observasi (`start_date` dan `end_date`) (`PASS`).
+  9. `test_duplicate_record_id_handling`: Penanganan tabrakan ID snapshot dilakukan secara eksplisit via `ON CONFLICT(id) DO UPDATE` (`PASS`).
+  10. `test_cli_performance_record_show_summary_smoke`: Pengujian smoke test seluruh subperintah CLI (`performance record`, `performance show`, `performance summary`) berjalan sukses dengan pencatatan audit log (`PASS`).
+  11. `test_cli_rejects_invalid_inputs_with_nonzero_exit_code`: CLI menolak nilai negatif, format timestamp tidak valid, dan rentang tanggal salah dengan pesan diagnostik yang jelas dan exit code 1 (`PASS`).

@@ -94,6 +94,7 @@ class PerformanceRecord(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
+    id: str | None = None
     content_id: str
     platform: str
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -102,6 +103,27 @@ class PerformanceRecord(BaseModel):
     orders: int | None = None
     commission_idr: float | None = None
     data_source: Literal["manual", "official_api"] = "manual"
+
+    @field_validator("views", "clicks", "orders")
+    @classmethod
+    def validate_non_negative_int(cls, v: int | None, info) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError(f"{info.field_name.capitalize()} must be non-negative")
+        return v
+
+    @field_validator("commission_idr")
+    @classmethod
+    def validate_non_negative_commission(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("Commission must be non-negative")
+        return v
+
+    @field_validator("content_id", "platform")
+    @classmethod
+    def validate_non_empty_str(cls, v: str, info) -> str:
+        if not v or not v.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string")
+        return v.strip()
 
 
 class Event(BaseModel):

@@ -169,6 +169,7 @@ class Database:
                         commission_idr REAL,
                         data_source TEXT NOT NULL
                     );
+                    CREATE INDEX IF NOT EXISTS idx_perf_content_platform ON performance_records (content_id, platform, observed_at);
 
                     CREATE TABLE IF NOT EXISTS events (
                         id TEXT PRIMARY KEY,
@@ -478,7 +479,28 @@ class Database:
                 conn.close()
 
     # --- Performance Records ---
-    def save_performance_record(self, record_id: str, record: PerformanceRecord) -> None:
+    def save_performance_record(
+        self,
+        record_id: str | PerformanceRecord,
+        record: PerformanceRecord | None = None,
+    ) -> str:
+        """Save a performance record snapshot.
+
+        Supports both positional signatures:
+        - save_performance_record(record_id, record)
+        - save_performance_record(record)
+        """
+        import uuid
+        if isinstance(record_id, PerformanceRecord):
+            rec = record_id
+            rec_id = rec.id or str(uuid.uuid4())
+        else:
+            rec = record
+            if rec is None:
+                raise ValueError("PerformanceRecord instance is required.")
+            rec_id = record_id or rec.id or str(uuid.uuid4())
+
+        rec.id = rec_id
         conn = self.get_connection()
         try:
             with conn:
@@ -488,23 +510,28 @@ class Database:
                         id, content_id, platform, observed_at, views, clicks, orders, commission_idr, data_source
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                        content_id=excluded.content_id,
+                        platform=excluded.platform,
+                        observed_at=excluded.observed_at,
                         views=excluded.views,
                         clicks=excluded.clicks,
                         orders=excluded.orders,
-                        commission_idr=excluded.commission_idr
+                        commission_idr=excluded.commission_idr,
+                        data_source=excluded.data_source
                     """,
                     (
-                        record_id,
-                        record.content_id,
-                        record.platform,
-                        record.observed_at.isoformat(),
-                        record.views,
-                        record.clicks,
-                        record.orders,
-                        record.commission_idr,
-                        record.data_source,
+                        rec_id,
+                        rec.content_id,
+                        rec.platform,
+                        rec.observed_at.isoformat(),
+                        rec.views,
+                        rec.clicks,
+                        rec.orders,
+                        rec.commission_idr,
+                        rec.data_source,
                     ),
                 )
+            return rec_id
         finally:
             if self._conn_str != ":memory:":
                 conn.close()
@@ -520,6 +547,7 @@ class Database:
             if not row:
                 return None
             return PerformanceRecord(
+                id=row["id"],
                 content_id=row["content_id"],
                 platform=row["platform"],
                 observed_at=datetime.fromisoformat(row["observed_at"]),
@@ -529,6 +557,57 @@ class Database:
                 commission_idr=row["commission_idr"],
                 data_source=row["data_source"],
             )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def list_performance_records(
+        self,
+        content_id: str | None = None,
+        platform: str | None = None,
+        start_date: datetime | str | None = None,
+        end_date: datetime | str | None = None,
+    ) -> list[PerformanceRecord]:
+        """List performance record snapshots filtered by content, platform, or date range.
+
+        Returns snapshots sorted chronologically (observed_at ASC, id ASC).
+        """
+        conn = self.get_connection()
+        try:
+            query = "SELECT * FROM performance_records WHERE 1=1"
+            params: list[Any] = []
+            if content_id:
+                query += " AND content_id = ?"
+                params.append(content_id)
+            if platform:
+                query += " AND platform = ?"
+                params.append(platform)
+            if start_date:
+                start_iso = start_date.isoformat() if isinstance(start_date, datetime) else str(start_date)
+                query += " AND observed_at >= ?"
+                params.append(start_iso)
+            if end_date:
+                end_iso = end_date.isoformat() if isinstance(end_date, datetime) else str(end_date)
+                query += " AND observed_at <= ?"
+                params.append(end_iso)
+
+            query += " ORDER BY observed_at ASC, id ASC"
+            cursor = conn.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            return [
+                PerformanceRecord(
+                    id=row["id"],
+                    content_id=row["content_id"],
+                    platform=row["platform"],
+                    observed_at=datetime.fromisoformat(row["observed_at"]),
+                    views=row["views"],
+                    clicks=row["clicks"],
+                    orders=row["orders"],
+                    commission_idr=row["commission_idr"],
+                    data_source=row["data_source"],
+                )
+                for row in rows
+            ]
         finally:
             if self._conn_str != ":memory:":
                 conn.close()

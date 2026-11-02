@@ -21,7 +21,16 @@ from affiliate_factory.exporter import (
 )
 from affiliate_factory.intake import intake_product
 from affiliate_factory.llm import ManualPaste
-from affiliate_factory.models import Product
+import re
+import uuid
+from datetime import datetime, timezone
+
+from affiliate_factory.analytics import (
+    calculate_conversion_rates,
+    calculate_performance_summary,
+    check_metric_anomalies,
+)
+from affiliate_factory.models import Event, PerformanceRecord, Product
 from affiliate_factory.orchestrator import run_pipeline
 from affiliate_factory.prompting import build_copywriting_prompt, parse_and_validate_ai_draft
 from affiliate_factory.review import ReviewError, approve_draft, reject_draft, review_claim
@@ -339,6 +348,290 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 1
 
 
+
+def cmd_performance_record(args: argparse.Namespace) -> int:
+    """Record an empirical performance snapshot for posted content."""
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = Database(db_path)
+
+    # 1. Validate non-negative numbers
+    for metric_name, val in [("views", args.views), ("clicks", args.clicks), ("orders", args.orders)]:
+        if val is not None and val < 0:
+            print(f"[VALIDATION_ERROR] Nilai {metric_name} tidak boleh negatif ({val}).", file=sys.stderr)
+            return 1
+
+    if args.commission is not None and args.commission < 0:
+        print(f"[VALIDATION_ERROR] Nilai komisi tidak boleh negatif ({args.commission}).", file=sys.stderr)
+        return 1
+
+    # 2. Parse observed_at timestamp
+    if args.observed_at:
+        try:
+            observed_dt = datetime.fromisoformat(args.observed_at.strip())
+            if observed_dt.tzinfo is None:
+                observed_dt = observed_dt.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            print(
+                f"[VALIDATION_ERROR] Format timestamp tidak valid: '{args.observed_at}'. "
+                f"Gunakan format ISO-8601 (contoh: '2026-11-02T10:00:00Z').",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        observed_dt = datetime.now(timezone.utc)
+
+    # 3. Check content existence in content_drafts without faking posted status
+    conn = db.get_connection()
+    try:
+        draft_rows = conn.execute(
+            "SELECT id, status, prompt_version FROM content_drafts WHERE id = ?",
+            (args.content_id.strip(),),
+        ).fetchall()
+    finally:
+        if db._conn_str != ":memory:":
+            conn.close()
+
+    if not draft_rows:
+        print(
+            f"[PERINGATAN] Content ID '{args.content_id}' tidak ditemukan di tabel content_drafts lokal. "
+            f"Snapshot tetap dicatat sebagai konten eksternal/mandiri."
+        )
+    else:
+        latest_status = draft_rows[-1]["status"]
+        if latest_status not in ("approved", "posted", "measured"):
+            print(
+                f"[PERINGATAN] Draf '{args.content_id}' saat ini berstatus '{latest_status}' "
+                f"(belum disetujui / diposting). Snapshot tetap dicatat."
+            )
+
+    # 4. Check anomalies (clicks > views or orders > clicks)
+    anomalies = check_metric_anomalies(views=args.views, clicks=args.clicks, orders=args.orders)
+    for w in anomalies:
+        print(f"[PERINGATAN ANOMALI] {w}")
+
+    # 5. Create PerformanceRecord instance
+    try:
+        record = PerformanceRecord(
+            content_id=args.content_id.strip(),
+            platform=args.platform.strip(),
+            observed_at=observed_dt,
+            views=args.views,
+            clicks=args.clicks,
+            orders=args.orders,
+            commission_idr=args.commission,
+            data_source=args.source,
+        )
+    except Exception as e:
+        print(f"[VALIDATION_ERROR] Validasi data metrik gagal: {e}", file=sys.stderr)
+        return 1
+
+    # 6. Generate stable unique snapshot ID if not given
+    if args.record_id:
+        rec_id = args.record_id.strip()
+    else:
+        clean_cid = re.sub(r"[^A-Za-z0-9_-]", "_", args.content_id.strip())
+        clean_plat = re.sub(r"[^A-Za-z0-9_-]", "_", args.platform.strip().lower())
+        ts_slug = observed_dt.strftime("%Y%m%dT%H%M%SZ")
+        rec_id = f"perf_{clean_cid}_{clean_plat}_{ts_slug}_{uuid.uuid4().hex[:6]}"
+
+    # 7. Persist to SQLite
+    db.save_performance_record(rec_id, record)
+
+    # 8. Record audit event
+    db.append_event(
+        Event(
+            id=str(uuid.uuid4()),
+            ts=datetime.now(timezone.utc),
+            run_id=str(uuid.uuid4()),
+            module="performance",
+            action="record_snapshot",
+            status="succeeded",
+            ref_type="content_id",
+            ref_id=args.content_id.strip(),
+            note=(
+                f"Recorded snapshot {rec_id} for platform '{args.platform}': "
+                f"views={args.views}, clicks={args.clicks}, orders={args.orders}, "
+                f"commission_idr={args.commission}"
+            ),
+        )
+    )
+
+    rates = calculate_conversion_rates(
+        views=args.views,
+        clicks=args.clicks,
+        orders=args.orders,
+        commission_idr=args.commission,
+    )
+
+    print("\n[SUKSES] Snapshot performa berhasil dicatat.")
+    print(f"Snapshot ID  : {rec_id}")
+    print(f"Content ID   : {record.content_id}")
+    print(f"Platform     : {record.platform}")
+    print(f"Observed At  : {record.observed_at.isoformat()}")
+    print(f"Data Source  : {record.data_source.upper()} ({'Manual self-reported, not verified by Shopee API' if record.data_source == 'manual' else 'Official API'})")
+    print(f"Views        : {record.views if record.views is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"Clicks       : {record.clicks if record.clicks is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"Orders       : {record.orders if record.orders is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"Komisi (IDR) : {f'Rp {record.commission_idr:,.0f}' if record.commission_idr is not None else '[TIDAK DIKETAHUI / NONE]'}")
+    print(f"CTR          : {f'{rates.ctr:.2f}%' if rates.ctr is not None else 'N/A'}")
+    print(f"Click-to-Ord : {f'{rates.click_to_order:.2f}%' if rates.click_to_order is not None else 'N/A'}")
+    return 0
+
+
+def cmd_performance_show(args: argparse.Namespace) -> int:
+    """Display snapshot history for a specific content ID."""
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = Database(db_path)
+
+    records = db.list_performance_records(
+        content_id=args.content_id.strip(),
+        platform=args.platform.strip() if args.platform else None,
+    )
+
+    if not records:
+        plat_msg = f" pada platform '{args.platform}'" if args.platform else ""
+        print(f"Tidak ada riwayat snapshot performa untuk content_id: '{args.content_id}'{plat_msg}.")
+        return 0
+
+    print("\n=== RIWAYAT SNAPSHOT PERFORMA KONTEN ===")
+    print(f"Content ID     : {args.content_id}")
+    print(f"Total Snapshot : {len(records)}")
+
+    for idx, r in enumerate(records, start=1):
+        rates = calculate_conversion_rates(
+            views=r.views,
+            clicks=r.clicks,
+            orders=r.orders,
+            commission_idr=r.commission_idr,
+        )
+        print(f"\n[{idx}] Snapshot ID : {r.id}")
+        print(f"    Waktu Pantau: {r.observed_at.isoformat()}")
+        print(f"    Platform    : {r.platform} ({r.data_source})")
+        print(f"    Tayangan    : {r.views if r.views is not None else '-'}")
+        print(f"    Klik        : {r.clicks if r.clicks is not None else '-'}")
+        print(f"    Pesanan     : {r.orders if r.orders is not None else '-'}")
+        print(f"    Komisi      : {f'Rp {r.commission_idr:,.0f}' if r.commission_idr is not None else '-'}")
+        print(f"    CTR         : {f'{rates.ctr:.2f}%' if rates.ctr is not None else '-'}")
+        print(f"    Click-to-Ord: {f'{rates.click_to_order:.2f}%' if rates.click_to_order is not None else '-'}")
+
+    return 0
+
+
+def cmd_performance_summary(args: argparse.Namespace) -> int:
+    """Display aggregate conversion summary across snapshots."""
+    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db = Database(db_path)
+
+    start_dt = None
+    if args.start_date:
+        try:
+            start_dt = datetime.fromisoformat(args.start_date.strip())
+        except Exception:
+            print(f"[ERROR] Format --start-date tidak valid: '{args.start_date}'. Gunakan ISO-8601.", file=sys.stderr)
+            return 1
+
+    end_dt = None
+    if args.end_date:
+        try:
+            end_dt = datetime.fromisoformat(args.end_date.strip())
+        except Exception:
+            print(f"[ERROR] Format --end-date tidak valid: '{args.end_date}'. Gunakan ISO-8601.", file=sys.stderr)
+            return 1
+
+    records = db.list_performance_records(
+        content_id=args.content_id.strip() if args.content_id else None,
+        platform=args.platform.strip() if args.platform else None,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+
+    if not records:
+        print("Tidak ada snapshot performa yang sesuai dengan kriteria filter.")
+        return 0
+
+    summary = calculate_performance_summary(records)
+
+    print("\n============================================================")
+    print("=== RINGKASAN ANALITIK KONVERSI PERFORMA AFFILIATE ===")
+    print("============================================================")
+    print("> STRATEGI AGREGASI: Mengambil snapshot terbaru untuk setiap (content_id, platform).")
+    print("> Metrik kumulatif tidak dijumlahkan berulang antar-snapshot dari konten yang sama.")
+
+    if args.content_id:
+        print(f"- Filter Content ID : {args.content_id}")
+    if args.platform:
+        print(f"- Filter Platform   : {args.platform}")
+    if args.start_date:
+        print(f"- Filter Awal Waktu : {args.start_date}")
+    if args.end_date:
+        print(f"- Filter Akhir Waktu: {args.end_date}")
+
+    print("\n--- METRIK AGREGAT TERKINI ---")
+    print(f"Total Konten Unik : {summary.total_content_items}")
+    print(f"Total Snapshot    : {summary.total_snapshots}")
+
+    views_str = f"{summary.total_views:,}" if summary.total_views is not None else "Tidak diketahui"
+    if summary.views_unknown_count > 0:
+        views_str += f" ({summary.views_unknown_count} konten tidak mencatat tayangan)"
+    print(f"Total Tayangan    : {views_str}")
+
+    clicks_str = f"{summary.total_clicks:,}" if summary.total_clicks is not None else "Tidak diketahui"
+    if summary.clicks_unknown_count > 0:
+        clicks_str += f" ({summary.clicks_unknown_count} konten tidak mencatat klik)"
+    print(f"Total Klik        : {clicks_str}")
+
+    orders_str = f"{summary.total_orders:,}" if summary.total_orders is not None else "Tidak diketahui"
+    if summary.orders_unknown_count > 0:
+        orders_str += f" ({summary.orders_unknown_count} konten tidak mencatat pesanan)"
+    print(f"Total Pesanan     : {orders_str}")
+
+    comm_str = f"Rp {summary.total_commission_idr:,.0f}" if summary.total_commission_idr is not None else "Tidak diketahui"
+    if summary.commission_unknown_count > 0:
+        comm_str += f" ({summary.commission_unknown_count} konten tidak mencatat komisi)"
+    print(f"Total Komisi (IDR): {comm_str}")
+
+    ctr_str = f"{summary.aggregate_rates.ctr:.2f}%" if summary.aggregate_rates.ctr is not None else "N/A"
+    print(f"CTR Keseluruhan   : {ctr_str}")
+
+    co_str = f"{summary.aggregate_rates.click_to_order:.2f}%" if summary.aggregate_rates.click_to_order is not None else "N/A"
+    print(f"Click-to-Order CR : {co_str}")
+
+    cpo_str = f"Rp {summary.aggregate_rates.commission_per_order:,.0f}" if summary.aggregate_rates.commission_per_order is not None else "N/A"
+    print(f"Komisi per Pesanan: {cpo_str}")
+
+    print("\n--- RINCIAN PER KONTEN (SNAPSHOT TERAKHIR) ---")
+    for item in summary.items:
+        v_str = f"{item.views:,}" if item.views is not None else "-"
+        c_str = f"{item.clicks:,}" if item.clicks is not None else "-"
+        o_str = f"{item.orders:,}" if item.orders is not None else "-"
+        comm_item = f"Rp {item.commission_idr:,.0f}" if item.commission_idr is not None else "-"
+        ctr_item = f"{item.rates.ctr:.2f}%" if item.rates.ctr is not None else "-"
+        co_item = f"{item.rates.click_to_order:.2f}%" if item.rates.click_to_order is not None else "-"
+
+        print(f"\n* Konten: {item.content_id} [{item.platform}] (Snapshots: {item.snapshot_count})")
+        print(f"  Terakhir: {item.latest_observed_at.isoformat()} ({item.data_source})")
+        print(f"  Metrik  : Views={v_str} | Klik={c_str} | Pesanan={o_str} | Komisi={comm_item}")
+        print(f"  Rasio   : CTR={ctr_item} | Click-to-Order={co_item}")
+
+        # If multiple snapshots, show growth delta
+        if item.snapshot_count > 1:
+            delta_parts = []
+            if item.views_delta is not None:
+                delta_parts.append(f"Views: {'+' if item.views_delta >= 0 else ''}{item.views_delta:,}")
+            if item.clicks_delta is not None:
+                delta_parts.append(f"Klik: {'+' if item.clicks_delta >= 0 else ''}{item.clicks_delta:,}")
+            if item.orders_delta is not None:
+                delta_parts.append(f"Pesanan: {'+' if item.orders_delta >= 0 else ''}{item.orders_delta:,}")
+            if item.commission_delta is not None:
+                delta_parts.append(f"Komisi: Rp {'+' if item.commission_delta >= 0 else ''}{item.commission_delta:,.0f}")
+            if delta_parts:
+                print(f"  Pertumbuhan Window ({item.snapshot_count} snapshot): {', '.join(delta_parts)}")
+
+    print("\n> CATATAN: Korelasi metrik tidak membuktikan kausalitas langsung.")
+    print("> Data bersumber manual dicatat sesuai laporan pengguna tanpa verifikasi server Shopee.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct CLI argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -423,6 +716,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser_export.add_argument("--overwrite", action="store_true", help="Timpa paket jika direktori target sudah ada.")
     parser_export.add_argument("--db", help="Path ke SQLite database.")
     parser_export.set_defaults(func=cmd_export)
+
+    # 7. performance (Parent command)
+    parser_perf = subparsers.add_parser("performance", help="Pencatatan metrik performa & analitik konversi affiliate.")
+    perf_subparsers = parser_perf.add_subparsers(dest="perf_action", required=True)
+
+    # 7a. performance record
+    p_record = perf_subparsers.add_parser("record", help="Catat snapshot metrik performa konten yang diposting.")
+    p_record.add_argument("--content-id", required=True, help="ID konten draf terkait.")
+    p_record.add_argument("--platform", required=True, help="Platform penayangan (misal: 'Shopee Video', 'TikTok').")
+    p_record.add_argument("--views", type=int, help="Total tayangan (views) kumulatif saat observasi.")
+    p_record.add_argument("--clicks", type=int, help="Total klik tautan afiliasi saat observasi.")
+    p_record.add_argument("--orders", type=int, help="Total pesanan afiliasi saat observasi.")
+    p_record.add_argument("--commission", type=float, help="Total komisi afiliasi (IDR) saat observasi.")
+    p_record.add_argument("--observed-at", help="Waktu observasi ISO-8601 (default: waktu sekarang UTC).")
+    p_record.add_argument("--source", choices=["manual", "official_api"], default="manual", help="Sumber data (default: manual).")
+    p_record.add_argument("--record-id", help="ID snapshot kustom (opsional).")
+    p_record.add_argument("--db", help="Path ke SQLite database.")
+    p_record.set_defaults(func=cmd_performance_record)
+
+    # 7b. performance show
+    p_show = perf_subparsers.add_parser("show", help="Tampilkan riwayat snapshot performa satu konten.")
+    p_show.add_argument("--content-id", required=True, help="ID konten draf.")
+    p_show.add_argument("--platform", help="Filter berdasarkan platform (opsional).")
+    p_show.add_argument("--db", help="Path ke SQLite database.")
+    p_show.set_defaults(func=cmd_performance_show)
+
+    # 7c. performance summary
+    p_summary = perf_subparsers.add_parser("summary", help="Tampilkan ringkasan analitik konversi performa.")
+    p_summary.add_argument("--content-id", help="Filter berdasarkan content ID tertentu (opsional).")
+    p_summary.add_argument("--platform", help="Filter berdasarkan platform (opsional).")
+    p_summary.add_argument("--start-date", help="Batas awal rentang observasi ISO-8601 (opsional).")
+    p_summary.add_argument("--end-date", help="Batas akhir rentang observasi ISO-8601 (opsional).")
+    p_summary.add_argument("--db", help="Path ke SQLite database.")
+    p_summary.set_defaults(func=cmd_performance_summary)
 
     return parser
 
