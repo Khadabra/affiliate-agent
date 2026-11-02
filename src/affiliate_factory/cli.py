@@ -719,6 +719,13 @@ def cmd_performance_correct(args: argparse.Namespace) -> int:
 
 def cmd_performance_angles(args: argparse.Namespace) -> int:
     """Rank performance by angle and display CopywritingAdvisor guidance."""
+    if args.min_samples <= 0:
+        print(
+            f"[ERROR] Nilai --min-samples harus lebih besar dari 0 (diterima: {args.min_samples}).",
+            file=sys.stderr,
+        )
+        return 1
+
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     db = Database(db_path)
     ranker = AngleRanker(db)
@@ -781,15 +788,15 @@ def cmd_performance_angles(args: argparse.Namespace) -> int:
         print(f"Konten Berhasil Dipetakan: {report.mapped_contents_count}")
         print(f"Konten Tidak Terpetakan  : {report.unmapped_contents_count}")
 
-        print("\n--- TABEL PERINGKAT ANGLE ---")
+        print(f"\n--- TABEL PERINGKAT ANGLE ({report.sort_by}) ---")
         if not report.ranked_angles:
-            print("Tidak ada angle yang memenuhi syarat dengan data performa.")
+            print(f"Tidak ada angle yang memenuhi syarat dengan metrik valid untuk kriteria '{report.sort_by}'.")
         else:
             for item in report.ranked_angles:
                 m = item.metrics
                 v_str = f"{m.total_views:,}" if m.total_views is not None else "-"
                 c_str = f"{m.total_clicks:,}" if m.total_clicks is not None else "-"
-                o_str = f"{m.total_orders:,}" if m.total_orders is not None else "-"
+                o_str = f"{m.total_orders:,}" if m.total_orders is not None else "- (tidak diketahui)"
                 comm_str = f"Rp {m.total_commission_idr:,.0f}" if m.total_commission_idr is not None else "-"
                 ctr_str = f"{m.ctr:.2f}%" if m.ctr is not None else "N/A"
                 cr_str = f"{m.click_to_order:.2f}%" if m.click_to_order is not None else "N/A"
@@ -802,6 +809,22 @@ def cmd_performance_angles(args: argparse.Namespace) -> int:
                 print(f"     Pesanan          : {o_str} (Click-to-Order: {cr_str})")
                 print(f"     Total Komisi     : {comm_str}")
                 print(f"     Catatan Kualitas : {m.data_quality_note}")
+
+        if report.unranked_missing_metric_angles:
+            print(f"\n--- ANGLE DENGAN DATA TETAPI METRIK '{report.sort_by}' TIDAK TERSEDIA ---")
+            for item in report.unranked_missing_metric_angles:
+                m = item.metrics
+                v_str = f"{m.total_views:,}" if m.total_views is not None else "-"
+                c_str = f"{m.total_clicks:,}" if m.total_clicks is not None else "-"
+                o_str = f"{m.total_orders:,}" if m.total_orders is not None else "- (tidak diketahui)"
+                comm_str = f"Rp {m.total_commission_idr:,.0f}" if m.total_commission_idr is not None else "-"
+                ctr_str = f"{m.ctr:.2f}%" if m.ctr is not None else "N/A"
+                cr_str = f"{m.click_to_order:.2f}%" if m.click_to_order is not None else "N/A"
+
+                print(f"\n[-] Angle: {m.angle}")
+                print(f"    Status Bukti     : {m.confidence_label} ({m.total_contents} konten)")
+                print(f"    Catatan Kualitas : {m.data_quality_note}")
+                print(f"    Metrik Tercatat  : Views={v_str} | Klik={c_str} (CTR: {ctr_str}) | Pesanan={o_str} (CR: {cr_str}) | Komisi={comm_str}")
 
         if report.unranked_angles:
             print("\n--- ANGLE TANPA DATA PERFORMA ---")

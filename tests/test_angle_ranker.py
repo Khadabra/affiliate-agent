@@ -1,7 +1,8 @@
-"""Unit tests for AngleRanker and CopywritingAdvisor (Phase 2.2).
+"""Unit tests for AngleRanker and CopywritingAdvisor (Phase 2.2 & 2.2.1).
 
 Validates empirical aggregation, snapshot deduplication, draft identity mapping,
-confidence labeling, platform isolation, and transparent copywriting guidance.
+confidence labeling, platform isolation, None semantics, ranking eligibility,
+parameter validation, and transparent copywriting guidance.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         r2 = PerformanceRecord(content_id="d2", platform="Shopee Video", observed_at=t0, views=2000, clicks=100)
 
         ranker = AngleRanker()
-        report = ranker.rank_angles(records=[r1, r2], drafts=[draft1, draft2], platform="Shopee Video")
+        report = ranker.rank_angles(records=[r1, r2], drafts=[draft1, draft2], platform="Shopee Video", sort_by="ctr")
 
         self.assertEqual(len(report.ranked_angles), 1)
         m = report.ranked_angles[0].metrics
@@ -99,14 +100,19 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         r = PerformanceRecord(content_id="d1", platform="Shopee Video", observed_at=t0, clicks=20)
 
         ranker = AngleRanker()
-        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video")
+        # Sort by ctr or evaluate metrics in unranked_missing_metric_angles
+        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video", sort_by="click_to_order")
 
-        m = report.ranked_angles[0].metrics
+        # Because click_to_order is None, it is not in ranked_angles, but in unranked_missing_metric_angles
+        self.assertEqual(len(report.ranked_angles), 0)
+        self.assertEqual(len(report.unranked_missing_metric_angles), 1)
+        m = report.unranked_missing_metric_angles[0].metrics
         self.assertIsNone(m.total_views)
         self.assertEqual(m.total_clicks, 20)
         self.assertIsNone(m.total_orders)
         self.assertIsNone(m.total_commission_idr)
         self.assertEqual(m.views_unknown_count, 1)
+        self.assertEqual(m.orders_unknown_count, 1)
         self.assertIsNone(m.ctr)
         self.assertIsNone(m.click_to_order)
 
@@ -120,11 +126,12 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         r = PerformanceRecord(content_id="d1", platform="Shopee Video", observed_at=t0, views=0, clicks=0, orders=0)
 
         ranker = AngleRanker()
-        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video")
+        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video", sort_by="orders")
 
         m = report.ranked_angles[0].metrics
         self.assertEqual(m.total_views, 0)
         self.assertEqual(m.total_clicks, 0)
+        self.assertEqual(m.total_orders, 0)
         # Denominator zero -> None (N/A), never ZeroDivisionError or 0.0
         self.assertIsNone(m.ctr)
         self.assertIsNone(m.click_to_order)
@@ -147,7 +154,7 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         ]
 
         ranker = AngleRanker()
-        report = ranker.rank_angles(records=recs, drafts=[draft], platform="Shopee Video")
+        report = ranker.rank_angles(records=recs, drafts=[draft], platform="Shopee Video", sort_by="views")
 
         self.assertEqual(report.total_independent_contents, 1)
         m = report.ranked_angles[0].metrics
@@ -171,9 +178,9 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         r1 = PerformanceRecord(content_id="d1", platform="Shopee Video", observed_at=t0, views=500, clicks=20)
 
         ranker = AngleRanker()
-        report = ranker.rank_angles(records=[r1], drafts=[draft1, draft2], platform="Shopee Video")
+        report = ranker.rank_angles(records=[r1], drafts=[draft1, draft2], platform="Shopee Video", sort_by="views")
 
-        # Active angle has rank #1
+        # Active angle has rank #1 for views
         self.assertEqual(len(report.ranked_angles), 1)
         self.assertEqual(report.ranked_angles[0].rank, 1)
         self.assertEqual(report.ranked_angles[0].metrics.angle, "Active-Angle")
@@ -195,7 +202,7 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         r_orphan = PerformanceRecord(content_id="orphan_draft_99", platform="Shopee Video", observed_at=t0, views=500)
 
         ranker = AngleRanker()
-        report = ranker.rank_angles(records=[r_known, r_orphan], drafts=[draft], platform="Shopee Video")
+        report = ranker.rank_angles(records=[r_known, r_orphan], drafts=[draft], platform="Shopee Video", sort_by="views")
 
         self.assertEqual(report.mapped_contents_count, 1)
         self.assertEqual(report.unmapped_contents_count, 1)
@@ -245,7 +252,7 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         self.assertIn("Data lintas platform terdeteksi", str(ctx.exception))
 
         # Explicit allow_cross_platform=True succeeds and flags report
-        report = ranker.rank_angles(records=[r_shopee, r_tiktok], drafts=[draft], allow_cross_platform=True)
+        report = ranker.rank_angles(records=[r_shopee, r_tiktok], drafts=[draft], allow_cross_platform=True, sort_by="views")
         self.assertTrue(report.is_cross_platform)
         self.assertEqual(report.ranked_angles[0].metrics.total_views, 300)
 
@@ -260,11 +267,11 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         r_tiktok = PerformanceRecord(content_id="d1", platform="TikTok", observed_at=t0, views=500)
 
         ranker = AngleRanker()
-        report_shopee = ranker.rank_angles(records=[r_shopee, r_tiktok], drafts=[draft], platform="Shopee Video")
+        report_shopee = ranker.rank_angles(records=[r_shopee, r_tiktok], drafts=[draft], platform="Shopee Video", sort_by="views")
         self.assertEqual(report_shopee.platform, "Shopee Video")
         self.assertEqual(report_shopee.ranked_angles[0].metrics.total_views, 100)
 
-        report_tiktok = ranker.rank_angles(records=[r_shopee, r_tiktok], drafts=[draft], platform="TikTok")
+        report_tiktok = ranker.rank_angles(records=[r_shopee, r_tiktok], drafts=[draft], platform="TikTok", sort_by="views")
         self.assertEqual(report_tiktok.platform, "TikTok")
         self.assertEqual(report_tiktok.ranked_angles[0].metrics.total_views, 500)
 
@@ -284,7 +291,7 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
 
         ranker = AngleRanker()
         # min_samples=3, but we only have 2 contents
-        report = ranker.rank_angles(records=[r1, r2], drafts=[draft1, draft2], platform="Shopee Video", min_samples=3)
+        report = ranker.rank_angles(records=[r1, r2], drafts=[draft1, draft2], platform="Shopee Video", min_samples=3, sort_by="views")
 
         m = report.ranked_angles[0].metrics
         self.assertEqual(m.total_contents, 2)
@@ -299,7 +306,7 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
         ]
         t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
         recs = [
-            PerformanceRecord(content_id=f"d_{i}", platform="Shopee Video", observed_at=t0, views=100 * (i + 1), clicks=5 * (i + 1), orders=i % 2)
+            PerformanceRecord(content_id=f"d_{i}", platform="Shopee Video", observed_at=t0, views=100 * (i + 1), clicks=5 * (i + 1), orders=i % 2 + 1)
             for i in range(6)
         ]
 
@@ -396,6 +403,217 @@ class TestAngleRankerAndAdvisor(unittest.TestCase):
             str(self.db_path),
         ])
         self.assertEqual(code, 0)
+
+    # -------------------------------------------------------------
+    # NEW REGRESSION TESTS FOR PHASE 2.2.1
+    # -------------------------------------------------------------
+
+    # 16. click_to_order=None is never displayed as 0.00%
+    def test_click_to_order_none_not_displayed_as_zero_percent(self) -> None:
+        draft = ContentDraft(
+            id="d_nocr", product_id="prod_test_01", angle="No-CR-Angle",
+            hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0"
+        )
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        r = PerformanceRecord(content_id="d_nocr", platform="Shopee Video", observed_at=t0, views=1000, clicks=50)
+
+        ranker = AngleRanker()
+        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video", sort_by="ctr")
+
+        advisor = CopywritingAdvisor()
+        advice = advisor.advise(report)
+
+        for rec in advice.recommendations:
+            self.assertNotIn("0.00%", rec.observation, "click_to_order=None must not be formatted as 0.00%")
+            self.assertNotIn("0.00%", rec.headline)
+
+    # 17. orders=None is never displayed as 0 orders
+    def test_orders_none_not_displayed_as_zero_orders(self) -> None:
+        draft = ContentDraft(
+            id="d_no_o", product_id="prod_test_01", angle="No-Orders-Angle",
+            hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0"
+        )
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        r = PerformanceRecord(content_id="d_no_o", platform="Shopee Video", observed_at=t0, views=1000, clicks=50)
+
+        ranker = AngleRanker()
+        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video", sort_by="ctr")
+
+        advisor = CopywritingAdvisor()
+        advice = advisor.advise(report)
+
+        for rec in advice.recommendations:
+            self.assertNotIn("0 pesanan", rec.observation, "orders=None must not be stated as '0 pesanan'")
+
+    # 18. Genuinely recorded zero orders distinguished from unknown orders
+    def test_recorded_zero_orders_distinguished_from_none(self) -> None:
+        draft_zero = ContentDraft(
+            id="d_z", product_id="prod_test_01", angle="Zero-Angle",
+            hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0"
+        )
+        draft_none = ContentDraft(
+            id="d_n", product_id="prod_test_01", angle="None-Angle",
+            hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0"
+        )
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        r_zero = PerformanceRecord(content_id="d_z", platform="Shopee Video", observed_at=t0, views=100, clicks=10, orders=0)
+        r_none = PerformanceRecord(content_id="d_n", platform="Shopee Video", observed_at=t0, views=100, clicks=10, orders=None)
+
+        ranker = AngleRanker()
+        report = ranker.rank_angles(records=[r_zero, r_none], drafts=[draft_zero, draft_none], platform="Shopee Video", sort_by="click_to_order")
+
+        # Zero-Angle has valid click_to_order=0.0%, so it is in ranked_angles
+        self.assertEqual(len(report.ranked_angles), 1)
+        z_metrics = report.ranked_angles[0].metrics
+        self.assertEqual(z_metrics.angle, "Zero-Angle")
+        self.assertEqual(z_metrics.total_orders, 0)
+        self.assertEqual(z_metrics.orders_known_count, 1)
+        self.assertEqual(z_metrics.click_to_order, 0.0)
+
+        # None-Angle has click_to_order=None, so it is in unranked_missing_metric_angles
+        self.assertEqual(len(report.unranked_missing_metric_angles), 1)
+        n_metrics = report.unranked_missing_metric_angles[0].metrics
+        self.assertEqual(n_metrics.angle, "None-Angle")
+        self.assertIsNone(n_metrics.total_orders)
+        self.assertEqual(n_metrics.orders_known_count, 0)
+        self.assertIsNone(n_metrics.click_to_order)
+
+    # 19. Angle without relevant metric for sort_by is not misleadingly ranked
+    def test_angle_without_relevant_metric_for_sort_by_not_misleadingly_ranked(self) -> None:
+        draft = ContentDraft(
+            id="d_only_views", product_id="prod_test_01", angle="Views-Only",
+            hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0"
+        )
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        r = PerformanceRecord(content_id="d_only_views", platform="Shopee Video", observed_at=t0, views=500)
+
+        ranker = AngleRanker()
+        # Sort by click_to_order when click_to_order is missing
+        report = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video", sort_by="click_to_order")
+
+        # Must NOT be in ranked_angles with rank #1
+        self.assertEqual(len(report.ranked_angles), 0)
+        # Must be separated into unranked_missing_metric_angles
+        self.assertEqual(len(report.unranked_missing_metric_angles), 1)
+        self.assertIsNone(report.unranked_missing_metric_angles[0].rank)
+        self.assertEqual(report.unranked_missing_metric_angles[0].metrics.angle, "Views-Only")
+        self.assertIn("kriteria pengurutan 'click_to_order' tidak tersedia", report.unranked_missing_metric_angles[0].metrics.data_quality_note)
+
+        # But sorting by views gives it rank #1
+        report_views = ranker.rank_angles(records=[r], drafts=[draft], platform="Shopee Video", sort_by="views")
+        self.assertEqual(len(report_views.ranked_angles), 1)
+        self.assertEqual(report_views.ranked_angles[0].rank, 1)
+
+    # 20. Ranking correct for all choices of sort_by
+    def test_ranking_correct_for_all_sort_by_options(self) -> None:
+        draft_a = ContentDraft(id="d_a", product_id="prod_test_01", angle="Angle-A", hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0")
+        draft_b = ContentDraft(id="d_b", product_id="prod_test_01", angle="Angle-B", hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0")
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+
+        # Angle A: Views=1000, Clicks=100 (CTR=10%), Orders=5 (CR=5%), Comm=50,000
+        r_a = PerformanceRecord(content_id="d_a", platform="Shopee Video", observed_at=t0, views=1000, clicks=100, orders=5, commission_idr=50000.0)
+        # Angle B: Views=2000, Clicks=50 (CTR=2.5%), Orders=10 (CR=20%), Comm=20,000
+        r_b = PerformanceRecord(content_id="d_b", platform="Shopee Video", observed_at=t0, views=2000, clicks=50, orders=10, commission_idr=20000.0)
+
+        ranker = AngleRanker()
+
+        # Sort by click_to_order: Angle-B (20%) > Angle-A (5%)
+        rep_cr = ranker.rank_angles(records=[r_a, r_b], drafts=[draft_a, draft_b], platform="Shopee Video", sort_by="click_to_order")
+        self.assertEqual(rep_cr.ranked_angles[0].metrics.angle, "Angle-B")
+        self.assertEqual(rep_cr.ranked_angles[1].metrics.angle, "Angle-A")
+
+        # Sort by ctr: Angle-A (10%) > Angle-B (2.5%)
+        rep_ctr = ranker.rank_angles(records=[r_a, r_b], drafts=[draft_a, draft_b], platform="Shopee Video", sort_by="ctr")
+        self.assertEqual(rep_ctr.ranked_angles[0].metrics.angle, "Angle-A")
+        self.assertEqual(rep_ctr.ranked_angles[1].metrics.angle, "Angle-B")
+
+        # Sort by views: Angle-B (2000) > Angle-A (1000)
+        rep_views = ranker.rank_angles(records=[r_a, r_b], drafts=[draft_a, draft_b], platform="Shopee Video", sort_by="views")
+        self.assertEqual(rep_views.ranked_angles[0].metrics.angle, "Angle-B")
+        self.assertEqual(rep_views.ranked_angles[1].metrics.angle, "Angle-A")
+
+        # Sort by orders: Angle-B (10) > Angle-A (5)
+        rep_orders = ranker.rank_angles(records=[r_a, r_b], drafts=[draft_a, draft_b], platform="Shopee Video", sort_by="orders")
+        self.assertEqual(rep_orders.ranked_angles[0].metrics.angle, "Angle-B")
+        self.assertEqual(rep_orders.ranked_angles[1].metrics.angle, "Angle-A")
+
+        # Sort by commission: Angle-A (50000) > Angle-B (20000)
+        rep_comm = ranker.rank_angles(records=[r_a, r_b], drafts=[draft_a, draft_b], platform="Shopee Video", sort_by="commission")
+        self.assertEqual(rep_comm.ranked_angles[0].metrics.angle, "Angle-A")
+        self.assertEqual(rep_comm.ranked_angles[1].metrics.angle, "Angle-B")
+
+    # 21. Sufficient content sample without conversion data does not trigger conversion winner advice
+    def test_sufficient_content_samples_without_conversion_data_does_not_trigger_winner(self) -> None:
+        drafts = [
+            ContentDraft(id=f"d_c_{i}", product_id="prod_test_01", angle="Well-Sampled-No-CR", hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0")
+            for i in range(3)
+        ]
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        recs = [
+            PerformanceRecord(content_id=f"d_c_{i}", platform="Shopee Video", observed_at=t0, views=1000, clicks=50, orders=None)
+            for i in range(3)
+        ]
+
+        ranker = AngleRanker()
+        report = ranker.rank_angles(records=recs, drafts=drafts, platform="Shopee Video", min_samples=3, sort_by="views")
+
+        advisor = CopywritingAdvisor()
+        advice = advisor.advise(report)
+
+        # Must NOT emit promote_tested_angle
+        winner_rec = next((r for r in advice.recommendations if r.category == "promote_tested_angle"), None)
+        self.assertIsNone(winner_rec, "Cannot promote angle as conversion winner when conversion data is None")
+
+        # Must emit explore_insufficient_data advising to collect conversion metrics
+        explore_rec = next((r for r in advice.recommendations if r.category == "explore_insufficient_data"), None)
+        self.assertIsNotNone(explore_rec)
+        self.assertIn("Eksplorasi Konversi Diperlukan", explore_rec.headline)
+
+    # 22. Advisor suggestions contain no unverified commercial claims
+    def test_advisor_suggestions_contain_no_unverified_commercial_assumptions(self) -> None:
+        drafts = [
+            ContentDraft(id=f"d_comm_{i}", product_id="prod_test_01", angle="Testing-Angle", hook="h", script="s", caption="c", cta="cta", disclosure_text="#AI", prompt_version="v1.0")
+            for i in range(3)
+        ]
+        t0 = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+        # High CTR (5%), Low CR (1%) -> triggers Funnel Gap
+        recs = [
+            PerformanceRecord(content_id=f"d_comm_{i}", platform="Shopee Video", observed_at=t0, views=2000, clicks=100, orders=1)
+            for i in range(3)
+        ]
+
+        ranker = AngleRanker()
+        report = ranker.rank_angles(records=recs, drafts=drafts, platform="Shopee Video", min_samples=3)
+
+        advisor = CopywritingAdvisor()
+        advice = advisor.advise(report)
+
+        unverified_words = ["promo", "garansi", "voucher", "diskon", "keranjang kuning"]
+        for rec in advice.recommendations:
+            combined_text = (
+                rec.headline + " " + rec.observation + " " + rec.actionable_advice + " "
+                + " ".join(rec.hypothesis_text_suggestions)
+            ).lower()
+            for bad_word in unverified_words:
+                self.assertNotIn(bad_word, combined_text, f"Found unverified assumption '{bad_word}' in recommendation")
+
+    # 23. min_samples zero and negative rejected
+    def test_min_samples_zero_and_negative_rejected(self) -> None:
+        ranker = AngleRanker()
+        with self.assertRaises(ValueError) as ctx1:
+            ranker.rank_angles(records=[], drafts=[], min_samples=0)
+        self.assertIn("min_samples harus berupa bilangan bulat positif (> 0)", str(ctx1.exception))
+
+        with self.assertRaises(ValueError) as ctx2:
+            ranker.rank_angles(records=[], drafts=[], min_samples=-3)
+        self.assertIn("min_samples harus berupa bilangan bulat positif (> 0)", str(ctx2.exception))
+
+        # CLI tests for min_samples <= 0
+        code_zero = main(["performance", "angles", "--min-samples", "0", "--db", str(self.db_path)])
+        self.assertNotEqual(code_zero, 0)
+
+        code_neg = main(["performance", "angles", "--min-samples", "-1", "--db", str(self.db_path)])
+        self.assertNotEqual(code_neg, 0)
 
 
 if __name__ == "__main__":

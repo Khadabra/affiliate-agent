@@ -8,13 +8,14 @@ Dokumen ini memuat status kerja terkini proyek **AI Affiliate Content Factory** 
 Membangun sistem semi-otomatis modular untuk memproduksi, mengaudit kepatuhan, dan melacak konversi konten afiliasi Shopee Indonesia berbasis Python deterministik, penyimpanan lokal SQLite, dan persetujuan manusia.
 
 ## 2. Fase Saat Ini
-**Phase 2.2 Selesai Penuh** — Modul pemeringkatan angle performa (`AngleRanker`) dan penasihat naskah (`CopywritingAdvisor`) telah diimplementasikan penuh:
-1. **Deduplikasi Snapshot Kumulatif:** Snapshot performa berulang pada konten yang sama hanya mengambil snapshot terbaru di jendela analisis; tidak dihitung ganda sebagai konten independen baru.
-2. **Integritas Pemetaan Draf:** Konten hanya dipetakan jika draf memiliki versi prompt tunggal yang tidak ambigu. Record tanpa draf atau dengan versi prompt ganda (>1 versi) dieksklusikan dari ranking dan dicatat sebagai unmapped.
-3. **Pemisahan Lintas Platform:** Secara default, komparasi performa antarplatform dipisahkan tegas untuk mencegah percampuran karakteristik audiens.
-4. **Metrik Terbobot & Tanpa Ranking Palsu:** CTR dan Click-to-Order dihitung secara agregat berbobot dari kohort valid. Angle tanpa data performa diberikan `rank=None` dan status `TIDAK ADA DATA`.
-5. **Pelabelan Bukti & Penasihat Naskah:** Setiap angle diberi label bukti (`BUKTI CUKUP` vs `BUKTI TERBATAS`) berdasarkan batas sampel minimum yang dapat dikonfigurasi. Advisor memberikan rekomendasi praktis, mendeteksi funnel gap (CTR tinggi, CR rendah), dan menyarankan eksplorasi tanpa mengklaim pemenang palsu.
-Seluruh 86 unit test lolos pengujian tanpa error (`exit code 0`).
+**Phase 2.2.1 Selesai Penuh** — Perbaikan integritas analitik dan penasihat naskah (`Analytics & Advisor Integrity Fix`) telah selesai dan terverifikasi penuh:
+1. **Preservasi Semantik None vs Nol:** Metrik yang tidak tercatat bernilai `None` dan secara konsisten diformat sebagai `N/A` atau `[tidak diketahui]`, bukan `0.00%` atau `0 pesanan`. Nilai pesanan nol (`orders == 0`) yang benar-benar tercatat tetap dibedakan dari nilai yang tidak diketahui (`orders is None`).
+2. **Kelayakan Pemeringkatan (Ranking Eligibility):** Angle yang tidak memiliki metrik valid untuk kriteria pengurutan yang dipilih (`--sort-by`) tidak diberi peringkat menyesatkan, melainkan dipisahkan ke `unranked_missing_metric_angles` dengan `rank=None` dan catatan kualitas data transparan.
+3. **Pemisahan Kategori Angle:** Memisahkan secara tegas: (a) angle yang memenuhi syarat pemeringkatan (`ranked_angles`), (b) angle yang memiliki data tetapi metrik sort tidak tersedia (`unranked_missing_metric_angles`), dan (c) angle tanpa data performa sama sekali (`unranked_angles`).
+4. **Integritas Bukti Advisor:** CopywritingAdvisor dilarang mengklaim angle sebagai pemenang konversi jika data pesanan/konversi belum tersedia, dan merekomendasikan eksplorasi pengumpulan data.
+5. **Netralitas Template Advisor:** Seluruh asumsi komersial tanpa sumber (seperti "harga promo", "garansi resmi", "voucher toko", "keranjang kuning") telah dibersihkan dari template advisor, digantikan dengan draf hipotesis netral berstatus DRAFT di bawah kontrol Review Gate manusia.
+6. **Validasi Parameter:** Parameter `--min-samples` divalidasi ketat (`> 0`); nilai nol atau negatif ditolak deterministik pada modul `AngleRanker` dan CLI.
+Seluruh 94 unit test lolos pengujian tanpa error (`exit code 0`).
 
 ## 3. Daftar Selesai & Riwayat Commit
 - `1463915`: Inisialisasi Git, `.gitignore`, dan dokumen piagam tata kelola proyek.
@@ -27,17 +28,20 @@ Seluruh 86 unit test lolos pengujian tanpa error (`exit code 0`).
 - `5840ce1`: Phase 2 — Performance Tracking & Conversion Analytics via CLI (`performance record`, `performance show`, `performance summary`), validasi metrik non-negatif, preservasi `None`, deteksi anomali diagnostik, strategi agregasi snapshot non-double-counting, dan audit event (55 unit test).
 - `67799ad`: Phase 2.1 — Data Integrity & Analytics Hardening: immutabilitas snapshot historis, subperintah `performance correct`, rasio konversi agregat berbasis kohort lengkap, normalisasi UTC, determinisme tie-breaking, penolakan `NaN`/`Inf`, dan pemberitahuan parsial CLI (65 unit test).
 - `93dbdec`: Phase 2.1.1 — Performance Correction Auditability: koreksi snapshot atomik transaksional dengan audit payload sebelum/sesudah lengkap, proteksi rollback saat audit gagal, dan penelusuran sekuensial (71 unit test).
-- `Phase 2.2 (Saat Ini)`: Angle Ranker & Copywriting Advisor: pemeringkatan angle deterministik berbobot, isolasi lintas platform, deduplikasi snapshot kumulatif, penanganan draf ambigu, pelabelan bukti sampel minimum, modul rekomendasi copywriting, dan subperintah CLI `performance angles` (86 unit test).
+- `271007d`: Phase 2.2 — Angle Ranker & Copywriting Advisor: pemeringkatan angle deterministik berbobot, isolasi lintas platform, deduplikasi snapshot kumulatif, penanganan draf ambigu, pelabelan bukti sampel minimum, modul rekomendasi copywriting, dan subperintah CLI `performance angles` (86 unit test).
+- `Phase 2.2.1 (Saat Ini)`: Analytics & Advisor Integrity Fix: preservasi semantik None vs 0, kelayakan pemeringkatan berbasis metrik valid sort_by, pemisahan unranked_missing_metric_angles, pembersihan asumsi komersial template advisor, validasi parameter min_samples (94 unit test).
 
 ## 4. Keputusan Terkunci
 1. **Runtime:** Python 3.12 pada `.venv` lokal menggunakan `uv`.
-2. **Kontrak Data:** Pydantic v2 dengan validasi skema ketat (`extra="forbid"`). Model data baru mencakup `AnglePerformanceMetrics`, `AngleRankItem`, `AngleRankReport`, `UnmappedContentItem`, `CopywritingRecommendation`, dan `CopywritingAdviceReport`.
+2. **Kontrak Data:** Pydantic v2 dengan validasi skema ketat (`extra="forbid"`). Model data mencakup `AnglePerformanceMetrics`, `AngleRankItem`, `AngleRankReport`, `UnmappedContentItem`, `CopywritingRecommendation`, dan `CopywritingAdviceReport`.
 3. **Penyimpanan Snapshot & Immutabilitas:** Setiap observasi performa disimpan sebagai snapshot tersendiri dengan ID unik. Duplikasi ID ditolak secara default. Koreksi dilakukan atomik via `db.correct_performance_record` dengan jejak audit sebelum/sesudah.
 4. **Agregasi Non-Double-Counting:** Deduplikasi snapshot kumulatif dilakukan dengan mengambil snapshot terbaru per `(content_id, platform)`.
 5. **Isolasi Identitas Draf & Angle:** Hanya draf dengan versi prompt tunggal yang dipetakan ke angle. Draf dengan versi ganda atau tidak ditemukan dieksklusikan dari pemeringkatan demi integritas data.
 6. **Rasio Konversi Berbobot Berbasis Kohort:** CTR dan Click-to-Order dihitung dari total pembilang dibagi total penyebut pada kohort observasi lengkap, bukan rata-rata sederhana persentase.
 7. **Pemisahan Platform Default:** Data performa lintas platform tidak digabungkan kecuali operator memberikan flag `--all-platforms` secara eksplisit dengan catatan peringatan.
 8. **Transparansi Bukti & Pembatasan Klaim:** Angle dengan sampel kecil di bawah `min_samples` diberi label `BUKTI TERBATAS`. CopywritingAdvisor dilarang menjanjikan kenaikan konversi, dilarang menyatakan korelasi sebagai kausalitas, dan dilarang mengubah status draf secara sepihak.
+9. **Semantik None vs Nol & Kelayakan Ranking:** `None` merepresentasikan metrik yang belum diukur/diketahui (`N/A`), tidak pernah difabrikasi menjadi 0. Angle tanpa metrik valid untuk `--sort-by` tidak diberi peringkat palsu, melainkan dipisahkan ke `unranked_missing_metric_angles` dengan `rank=None`.
+10. **Netralitas Template Saran:** Seluruh saran copywriting bebas dari asumsi komersial tanpa sumber ("promo", "garansi", "voucher", "keranjang kuning") dan berstatus draf di bawah kontrol persetujuan manusia.
 
 ## 5. Hal Terbuka & Belum Terverifikasi (`NOT_VERIFIED`)
 1. Kredensial Shopee Affiliate Open API (`AppId` dan `Secret`) pengguna belum tersedia; seluruh data performa saat ini bersumber manual (`data_source="manual"`).

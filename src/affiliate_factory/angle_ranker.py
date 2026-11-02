@@ -50,7 +50,23 @@ class AngleRanker:
         4. No fake ranks: angles with 0 performance records receive rank=None.
         5. Cohort-based weighted metrics: CTR and Click-to-Order are calculated strictly
            over valid cohorts where both numerator and denominator are known.
+        6. Unknown metrics preservation: None means unknown, never fabricated to zero.
+        7. Ranking eligibility: angles without a valid metric for the chosen sort_by criterion
+           are excluded from ranked_angles and placed in unranked_missing_metric_angles (rank=None).
+        8. Parameter validation: min_samples must be > 0.
         """
+        # Validate min_samples
+        if min_samples <= 0:
+            raise ValueError(
+                f"Parameter min_samples harus berupa bilangan bulat positif (> 0), diterima: {min_samples}."
+            )
+
+        valid_sort_criteria = {"click_to_order", "ctr", "commission", "orders", "views"}
+        if sort_by not in valid_sort_criteria:
+            raise ValueError(
+                f"Kriteria sort_by '{sort_by}' tidak valid. Pilihan yang didukung: {', '.join(sorted(valid_sort_criteria))}."
+            )
+
         # 1. Fetch data from DB if not provided
         if records is None:
             if self.db is not None:
@@ -159,6 +175,7 @@ class AngleRanker:
 
         # 7. Aggregate metrics for each angle
         ranked_candidates: list[AnglePerformanceMetrics] = []
+        unranked_missing_metric_angles: list[AngleRankItem] = []
         unranked_angles: list[AngleRankItem] = []
 
         for angle, items in mapped_by_angle.items():
@@ -295,7 +312,34 @@ class AngleRanker:
                 confidence_label=conf_label,
                 data_quality_note=note,
             )
-            ranked_candidates.append(m)
+
+            # Check if metric for chosen sort_by criterion is valid
+            is_valid_sort_metric = False
+            if sort_by == "click_to_order":
+                is_valid_sort_metric = (m.click_to_order is not None)
+            elif sort_by == "ctr":
+                is_valid_sort_metric = (m.ctr is not None)
+            elif sort_by == "commission":
+                is_valid_sort_metric = (m.total_commission_idr is not None)
+            elif sort_by == "orders":
+                is_valid_sort_metric = (m.total_orders is not None)
+            elif sort_by == "views":
+                is_valid_sort_metric = (m.total_views is not None)
+
+            if is_valid_sort_metric:
+                ranked_candidates.append(m)
+            else:
+                missing_note = (
+                    f"Tercatat {m.total_contents} konten independen, namun metrik kriteria pengurutan '{sort_by}' "
+                    f"tidak tersedia / tidak terdefinisi (None)."
+                )
+                m_updated = m.model_copy(update={"data_quality_note": f"{m.data_quality_note} [KETERBATASAN: {missing_note}]"})
+                unranked_missing_metric_angles.append(
+                    AngleRankItem(
+                        rank=None,
+                        metrics=m_updated,
+                    )
+                )
 
         # 8. Sort ranked candidates deterministically
         def get_sort_key(m: AnglePerformanceMetrics):
@@ -315,8 +359,8 @@ class AngleRanker:
                 p1 = float(m.total_views) if m.total_views is not None else float("-inf")
                 p2 = float(m.total_clicks) if m.total_clicks is not None else float("-inf")
             else:
-                p1 = m.click_to_order if m.click_to_order is not None else float("-inf")
-                p2 = m.ctr if m.ctr is not None else float("-inf")
+                p1 = float("-inf")
+                p2 = float("-inf")
 
             # Deterministic tie-breaker:
             # 1. Primary metric (DESC)
@@ -333,8 +377,9 @@ class AngleRanker:
             for idx, m in enumerate(ranked_candidates, start=1)
         ]
 
-        # Sort unranked angles alphabetically
+        # Sort unranked angles
         unranked_angles.sort(key=lambda x: x.metrics.angle)
+        unranked_missing_metric_angles.sort(key=lambda x: (-x.metrics.total_contents, x.metrics.angle))
 
         mapped_count = sum(len(items) for items in mapped_by_angle.values() if items)
 
@@ -348,6 +393,7 @@ class AngleRanker:
             unmapped_contents_count=len(unmapped_items),
             ranked_angles=ranked_angles,
             unranked_angles=unranked_angles,
+            unranked_missing_metric_angles=unranked_missing_metric_angles,
             unmapped_items=unmapped_items,
             is_cross_platform=allow_cross_platform,
         )

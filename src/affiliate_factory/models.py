@@ -236,6 +236,7 @@ class AngleRankReport(BaseModel):
     unmapped_contents_count: int
     ranked_angles: list[AngleRankItem] = Field(default_factory=list)
     unranked_angles: list[AngleRankItem] = Field(default_factory=list)
+    unranked_missing_metric_angles: list[AngleRankItem] = Field(default_factory=list)
     unmapped_items: list[UnmappedContentItem] = Field(default_factory=list)
     is_cross_platform: bool = False
 

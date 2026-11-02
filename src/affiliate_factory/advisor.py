@@ -21,7 +21,7 @@ class CopywritingAdvisor:
         """Produce structured, evidence-backed advice based on angle rankings."""
         recommendations: list[CopywritingRecommendation] = []
 
-        # 1. Check if ANY angle has sufficient evidence
+        # 1. Identify candidate angles with sufficient content sample size
         angles_with_sufficient_proof = [
             item.metrics for item in report.ranked_angles
             if item.metrics.confidence_label == "BUKTI CUKUP"
@@ -42,7 +42,7 @@ class CopywritingAdvisor:
                         ),
                         actionable_advice=(
                             f"Fokuskan produksi pada pengumpulan observasi tambahan (minimal {report.min_samples} "
-                            f"konten independen per angle) sebelum memutuskan angle pemenang atau menghentikan angle tertentu."
+                            f"konten independen per angle) sebelum memutuskan angle prioritas atau menghentikan angle tertentu."
                         ),
                         hypothesis_text_suggestions=[],
                         evidence_strength="BUKTI TERBATAS",
@@ -61,47 +61,69 @@ class CopywritingAdvisor:
                     )
                 )
         else:
-            # Promote top angle among those with sufficient evidence
             top_angle = angles_with_sufficient_proof[0]
-            cr_str = f"{top_angle.click_to_order:.2f}%" if top_angle.click_to_order is not None else "N/A"
-            ctr_str = f"{top_angle.ctr:.2f}%" if top_angle.ctr is not None else "N/A"
-            orders_str = f"{top_angle.total_orders:,}" if top_angle.total_orders is not None else "0"
-            clicks_str = f"{top_angle.total_clicks:,}" if top_angle.total_clicks is not None else "0"
 
-            hook_suggestions = [
-                f"[DRAFT HOOK 1] 'Sering ngalamin kendala saat bikin konten? Angle {top_angle.angle} ini solusinya...'",
-                f"[DRAFT HOOK 2] 'Jangan beli produk ini sebelum tahu fitur penting yang satu ini...'",
-            ]
-
-            recommendations.append(
-                CopywritingRecommendation(
-                    category="promote_tested_angle",
-                    angle=top_angle.angle,
-                    headline=f"Prioritaskan Angle '{top_angle.angle}' untuk Produksi Berkelanjutan",
-                    observation=(
-                        f"Angle '{top_angle.angle}' mencatat performa konversi Click-to-Order {cr_str} "
-                        f"({orders_str} pesanan dari {clicks_str} klik) dan CTR {ctr_str} "
-                        f"dengan sampel {top_angle.total_contents} konten independen ({top_angle.confidence_label})."
-                    ),
-                    actionable_advice=(
-                        f"Jadikan angle '{top_angle.angle}' sebagai prioritas utama produksi naskah berikutnya. "
-                        f"Eksplorasi variasi hook baru dengan tetap mempertahankan struktur CTA yang sudah terbukti."
-                    ),
-                    hypothesis_text_suggestions=hook_suggestions,
-                    evidence_strength="BUKTI CUKUP",
+            # Invariant: Never promote an angle based on click_to_order if conversion data is unavailable
+            if top_angle.click_to_order is None:
+                recommendations.append(
+                    CopywritingRecommendation(
+                        category="explore_insufficient_data",
+                        angle=top_angle.angle,
+                        headline=f"Eksplorasi Konversi Diperlukan: Angle '{top_angle.angle}' Memiliki Sampel Cukup Namun Konversi Belum Tercatat",
+                        observation=(
+                            f"Angle '{top_angle.angle}' memiliki {top_angle.total_contents} konten independen "
+                            f"({top_angle.confidence_label}), namun data pesanan/konversi (click-to-order) belum tercatat (None). "
+                            f"Tingkat konversi belum dapat dinilai."
+                        ),
+                        actionable_advice=(
+                            f"Lengkapi pencatatan metrik pesanan untuk konten pada angle '{top_angle.angle}' sebelum "
+                            f"mengambil kesimpulan definitif mengenai efektivitas konversinya."
+                        ),
+                        hypothesis_text_suggestions=[],
+                        evidence_strength="BUKTI TERBATAS",
+                    )
                 )
-            )
+            else:
+                cr_str = f"{top_angle.click_to_order:.2f}%"
+                ctr_str = f"{top_angle.ctr:.2f}%" if top_angle.ctr is not None else "N/A"
+                orders_str = f"{top_angle.total_orders:,} pesanan" if top_angle.total_orders is not None else "pesanan tidak diketahui"
+                clicks_str = f"{top_angle.total_clicks:,} klik" if top_angle.total_clicks is not None else "klik tidak diketahui"
+
+                hook_suggestions = [
+                    f"[DRAFT HOOK 1] 'Menghadapi kendala dalam rutinitas harian? Mari kita tinjau solusi dari angle {top_angle.angle}...'",
+                    f"[DRAFT HOOK 2] 'Tiga hal penting yang perlu diperhatikan saat memilih produk pendukung aktivitas Anda...'",
+                ]
+
+                recommendations.append(
+                    CopywritingRecommendation(
+                        category="promote_tested_angle",
+                        angle=top_angle.angle,
+                        headline=f"Pertimbangkan Angle '{top_angle.angle}' untuk Produksi Berkelanjutan",
+                        observation=(
+                            f"Angle '{top_angle.angle}' mencatat performa konversi Click-to-Order {cr_str} "
+                            f"({orders_str} dari {clicks_str}) dan CTR {ctr_str} "
+                            f"dengan sampel {top_angle.total_contents} konten independen ({top_angle.confidence_label})."
+                        ),
+                        actionable_advice=(
+                            f"Jadikan angle '{top_angle.angle}' sebagai salah satu pertimbangan prioritas naskah berikutnya "
+                            f"dengan tetap memvalidasi kesesuaian narasi."
+                        ),
+                        hypothesis_text_suggestions=hook_suggestions,
+                        evidence_strength="BUKTI CUKUP",
+                    )
+                )
 
         # 2. Check Funnel Gap (High CTR but Low CR or 0 Orders)
         for item in report.ranked_angles:
             m = item.metrics
             if m.ctr is not None and m.ctr >= 3.0:
-                if m.click_to_order is None or m.click_to_order < 2.0:
+                if m.click_to_order is not None and m.click_to_order < 2.0:
                     ctr_val = f"{m.ctr:.2f}%"
-                    cr_val = f"{m.click_to_order:.2f}%" if m.click_to_order is not None else "0.00%"
+                    cr_val = f"{m.click_to_order:.2f}%"
+                    orders_str = f"{m.total_orders:,} pesanan" if m.total_orders is not None else "pesanan tidak tercatat"
                     cta_suggestions = [
-                        "[DRAFT CTA 1] 'Cek spesifikasi lengkap dan harga promo hari ini di keranjang kuning profil.'",
-                        "[DRAFT CTA 2] 'Pastikan klaim garansi resmi dan voucher toko sebelum checkout di bio.'",
+                        "[DRAFT CTA 1] 'Pelajari detail spesifikasi dan kecocokan kebutuhan produk melalui tautan di profil.'",
+                        "[DRAFT CTA 2] 'Simak ulasan lengkap dan kesesuaian produk sebelum memutuskan pembelian.'",
                     ]
                     recommendations.append(
                         CopywritingRecommendation(
@@ -110,16 +132,33 @@ class CopywritingAdvisor:
                             headline=f"Kesenjangan Corong (Funnel Gap) pada Angle '{m.angle}'",
                             observation=(
                                 f"Angle '{m.angle}' menarik minat klik dengan CTR {ctr_val}, namun Click-to-Order "
-                                f"hanya {cr_val} (pesanan tercatat: {m.total_orders or 0}). "
-                                f"Penonton mengklik tautan tetapi tidak menyelesaikan pembelian."
+                                f"tercatat {cr_val} ({orders_str}). "
+                                f"Penonton mengklik tautan tetapi tingkat penyelesaian pesanan masih rendah."
                             ),
                             actionable_advice=(
-                                "Evaluasi keselarasan ekspektasi antara narasi video dan informasi produk di Shopee. "
-                                "Perjelas kisaran harga dan garansi di bagian narasi agar penonton yang mengklik "
-                                "memiliki niat beli yang lebih matang."
+                                "Evaluasi keselarasan narasi konten dengan ekspektasi produk agar penonton yang mengklik "
+                                "memiliki pemahaman spesifikasi yang jelas sebelum mempertimbangkan pembelian."
                             ),
                             hypothesis_text_suggestions=cta_suggestions,
                             evidence_strength=m.confidence_label,
+                        )
+                    )
+                elif m.click_to_order is None and m.total_orders is None:
+                    recommendations.append(
+                        CopywritingRecommendation(
+                            category="explore_insufficient_data",
+                            angle=m.angle,
+                            headline=f"Data Konversi Belum Lengkap untuk CTR Tinggi pada Angle '{m.angle}'",
+                            observation=(
+                                f"Angle '{m.angle}' memiliki CTR {m.ctr:.2f}%, namun metrik pesanan dan Click-to-Order "
+                                f"belum tercatat (None). Tingkat konversi belum dapat dinilai."
+                            ),
+                            actionable_advice=(
+                                "Catat data pesanan untuk konten ini guna memastikan apakah rasio klik yang tinggi "
+                                "benar-benar berlanjut ke pembelian."
+                            ),
+                            hypothesis_text_suggestions=[],
+                            evidence_strength="BUKTI TERBATAS",
                         )
                     )
 
@@ -192,7 +231,7 @@ class CopywritingAdvisor:
 
         disclaimers = [
             "Korelasi metrik historis tidak membuktikan hubungan sebab-akibat (kausalitas).",
-            "Hasil pemeringkatan bersifat heuristik deskriptif berdasarkan data empiris yang tercatat, bukan ramalan mutlak masa depan.",
+            "Hasil pemeringkatan bersifat heuristik deskriptif berdasarkan data empiris yang tercatat, bukan ramalan mutlak masa depan atau klaim signifikansi statistik.",
             "Semua saran teks copywriting berstatus DRAFT dan WAJIB ditelaah melalui Review Gate (pemeriksaan klaim dan kepatuhan) serta disetujui manusia sebelum dipublikasikan.",
         ]
 

@@ -434,3 +434,48 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   13. `test_copywriting_advisor_aligns_with_metrics`: Rekomendasi CopywritingAdvisor menyertakan observasi data yang persis merujuk metrik empiris sumber tanpa fabrikasi (`PASS`).
   14. `test_insufficient_data_recommends_exploration_not_winner`: Ketika seluruh data bersampel kecil, advisor merekomendasikan eksplorasi sampel tambahan dan menolak mengklaim angle pemenang (`PASS`).
   15. `test_cli_performance_angles_smoke`: Smoke test subperintah CLI `performance angles` berjalan sempurna dengan exit code 0 (`PASS`).
+
+---
+
+## 14. Phase 2.2.1 — Analytics & Advisor Integrity Fix (2026-11-02)
+
+### Konteks & Audit Celah
+Audit terhadap implementasi Phase 2.2 mengidentifikasi beberapa area integritas analitik dan penasihat naskah yang diperbaiki:
+1. **Semantik None vs Nol:**
+   - Sebelumnya, jika `click_to_order is None` atau `total_orders is None`, observasi advisor dan formatting tertentu berisiko menampilkan `0.00%` atau `0 pesanan`.
+   - Diperbaiki: `None` secara tegas merepresentasikan metrik yang belum diukur/tidak diketahui (`N/A`). Nilai `orders == 0` yang benar-benar tercatat tetap dibedakan dari `orders is None`.
+2. **Kelayakan Pemeringkatan (Ranking Eligibility):**
+   - Sebelumnya, angle yang tidak memiliki nilai valid untuk metrik yang dipilih pada `--sort-by` tetap memperoleh peringkat (misal rank #1 untuk click_to_order meskipun `click_to_order is None`).
+   - Diperbaiki: Angle yang memiliki data performa tetapi tidak memiliki metrik valid untuk kriteria pengurutan dipisahkan ke `unranked_missing_metric_angles` dengan `rank = None` dan catatan kualitas transparan.
+   - Angle tanpa data performa sama sekali tetap berada di `unranked_angles` (`confidence_label="TIDAK ADA DATA"`).
+3. **Integritas Bukti Advisor:**
+   - CopywritingAdvisor dilarang mempromosikan angle sebagai pemenang konversi jika data konversi (`click_to_order` / `orders`) belum tersedia, meskipun jumlah konten memenuhi `min_samples`.
+   - Rekomendasi eksplorasi data diaktifkan secara transparan bila data konversi belum lengkap.
+4. **Pembersihan Asumsi Komersial:**
+   - Menghapus asumsi klaim komersial yang belum terverifikasi dari template saran advisor (seperti "harga promo", "garansi resmi", "voucher toko", "keranjang kuning profil", "bio").
+   - Saran disesuaikan menjadi draf hipotesis netral yang dapat diuji dan tetap berstatus DRAFT di bawah kontrol Review Gate manusia.
+5. **Validasi Parameter:**
+   - Parameter `min_samples <= 0` divalidasi dan ditolak secara deterministik pada modul `AngleRanker` dan CLI dengan pesan kesalahan ramah pengguna.
+
+### Hasil Eksekusi Unit Test Komprehensif
+- **Perintah Pengujian:**
+  ```powershell
+  $env:PYTHONPATH="src;."
+  & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 94 tests in 4.953s
+
+  OK
+  ```
+- **Rincian Pengujian Baru (8 Test Cases Tambahan pada `tests/test_angle_ranker.py`):**
+  16. `test_click_to_order_none_not_displayed_as_zero_percent`: Memastikan `click_to_order=None` tidak pernah diformat atau ditampilkan sebagai `0.00%` (`PASS`).
+  17. `test_orders_none_not_displayed_as_zero_orders`: Memastikan `orders=None` tidak pernah dinyatakan sebagai `0 pesanan` (`PASS`).
+  18. `test_recorded_zero_orders_distinguished_from_none`: Memastikan kondisi `orders == 0` yang tercatat secara nyata dibedakan tegas dari `orders is None` (`PASS`).
+  19. `test_angle_without_relevant_metric_for_sort_by_not_misleadingly_ranked`: Memastikan angle tanpa metrik relevan untuk kriteria pengurutan dipisahkan ke `unranked_missing_metric_angles` dengan `rank=None` (`PASS`).
+  20. `test_ranking_correct_for_all_sort_by_options`: Memastikan pemeringkatan deterministik berjalan tepat untuk seluruh opsi sort (`click_to_order`, `ctr`, `views`, `orders`, `commission`) (`PASS`).
+  21. `test_sufficient_content_samples_without_conversion_data_does_not_trigger_winner`: Memastikan sampel konten yang cukup tanpa data konversi tidak memicu klaim pemenang konversi (`PASS`).
+  22. `test_advisor_suggestions_contain_no_unverified_commercial_assumptions`: Memastikan saran advisor bebas dari asumsi komersial tanpa sumber ("promo", "garansi", "voucher", "diskon", "keranjang kuning") (`PASS`).
+  23. `test_min_samples_zero_and_negative_rejected`: Memastikan nilai `--min-samples` nol dan negatif ditolak dengan pesan kesalahan (`PASS`).
