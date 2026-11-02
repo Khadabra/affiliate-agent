@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Product(BaseModel):
@@ -22,6 +22,20 @@ class Product(BaseModel):
     price_observed_at: datetime | None = None
     source: Literal["manual", "official_api", "other"] = "manual"
     notes: str | None = None
+
+    @field_validator("price")
+    @classmethod
+    def validate_price(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("Price must be non-negative")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("Product URL must start with http:// or https://")
+        return v
 
 
 class ContentDraft(BaseModel):
@@ -49,7 +63,7 @@ class Claim(BaseModel):
     draft_id: str
     text: str
     source_ref: str | None = None
-    verification_status: Literal["UNVERIFIED", "SOURCED", "REJECTED"] = "UNVERIFIED"
+    verification_status: Literal["UNVERIFIED", "SOURCED", "VERIFIED", "REJECTED"] = "UNVERIFIED"
 
 
 class ComplianceFinding(BaseModel):
@@ -66,6 +80,7 @@ class ComplianceReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     draft_id: str
+    prompt_version: str = "v1.0"
     passed: bool
     findings: list[ComplianceFinding] = Field(default_factory=list)
 

@@ -201,3 +201,89 @@ Uji rendering video sintetis berdurasi 5 detik dengan resolusi vertikal 1080x192
   OK
   ```
 - **Kesimpulan:** Seluruh 8 test case berhasil diverifikasi lolos (`OK`). `test_generate_context_pack` memvalidasi bahwa `tools/make_context_pack.py` menghasilkan berkas konsolidasi `output/context_pack.md` yang memuat seluruh judul bagian dengan format tepat.
+
+---
+
+## 7. Verifikasi Fitur Phase 1 MVP (CLI, Prompting, Import Draft, dan Invariant Klaim)
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal Mentah:**
+  ```text
+  test_generate_context_pack (test_context_pack.TestContextPackGenerator.test_generate_context_pack) ... ok
+  test_claim_without_source_is_unverified (test_core.TestAffiliateFactoryCore.test_claim_without_source_is_unverified) ... ok
+  test_draft_with_prohibited_claim_fails_with_correct_rule_id (test_core.TestAffiliateFactoryCore.test_draft_with_prohibited_claim_fails_with_correct_rule_id) ... ok
+  test_draft_without_disclosure_fails_compliance (test_core.TestAffiliateFactoryCore.test_draft_without_disclosure_fails_compliance) ... ok
+  test_duplicate_product_url_does_not_duplicate (test_core.TestAffiliateFactoryCore.test_duplicate_product_url_does_not_duplicate) ... ok
+  test_orchestrator_run_twice_idempotence (test_core.TestAffiliateFactoryCore.test_orchestrator_run_twice_idempotence) ... ok
+  test_performance_record_unknown_fields_remain_none (test_core.TestAffiliateFactoryCore.test_performance_record_unknown_fields_remain_none) ... ok
+  test_valid_draft_passes_compliance (test_core.TestAffiliateFactoryCore.test_valid_draft_passes_compliance) ... ok
+  test_cli_intake_duplicate_urls_handled_safely (test_phase1_mvp.TestPhase1MVP.test_cli_intake_duplicate_urls_handled_safely) ... ok
+  test_cli_intake_invalid_json_and_validation_error (test_phase1_mvp.TestPhase1MVP.test_cli_intake_invalid_json_and_validation_error) ... ok
+  test_cli_intake_single_and_array_json (test_phase1_mvp.TestPhase1MVP.test_cli_intake_single_and_array_json) ... ok
+  test_cli_subcommands_smoke (test_phase1_mvp.TestPhase1MVP.test_cli_subcommands_smoke) ... ok
+  test_parse_and_validate_ai_draft_success (test_phase1_mvp.TestPhase1MVP.test_parse_and_validate_ai_draft_success) ... ok
+  test_parse_malformed_ai_output_fails_gracefully (test_phase1_mvp.TestPhase1MVP.test_parse_malformed_ai_output_fails_gracefully) ... ok
+  test_pipeline_integration_with_imported_draft (test_phase1_mvp.TestPhase1MVP.test_pipeline_integration_with_imported_draft) ... ok
+  test_product_invalid_url_scheme_rejected (test_phase1_mvp.TestPhase1MVP.test_product_invalid_url_scheme_rejected) ... ok
+  test_product_negative_price_rejected (test_phase1_mvp.TestPhase1MVP.test_product_negative_price_rejected) ... ok
+  test_prompt_generation_deterministic_and_no_fabrication (test_phase1_mvp.TestPhase1MVP.test_prompt_generation_deterministic_and_no_fabrication) ... ok
+  test_unverified_claim_cannot_silently_become_verified (test_phase1_mvp.TestPhase1MVP.test_unverified_claim_cannot_silently_become_verified) ... ok
+
+  ----------------------------------------------------------------------
+  Ran 19 tests in 0.424s
+
+  OK
+  ```
+- **Kesimpulan Evaluasi:**
+  1. `test_product_negative_price_rejected`: Model `Product` menolak harga negatif (`price < 0`) via validator (`PASS`).
+  2. `test_product_invalid_url_scheme_rejected`: Model `Product` menolak skema non-HTTP/HTTPS (`PASS`).
+  3. `test_cli_intake_single_and_array_json`: CLI `intake` berhasil memproses berkas JSON objek tunggal maupun array ke SQLite (`PASS`).
+  4. `test_cli_intake_duplicate_urls_handled_safely`: CLI `intake` mendeteksi URL duplikat dan melewatinya tanpa menduplikasi baris database (`PASS`).
+  5. `test_cli_intake_invalid_json_and_validation_error`: Menangani berkas korup atau skema salah dengan pesan diagnostik yang jelas dan exit code 1 (`PASS`).
+  6. `test_prompt_generation_deterministic_and_no_fabrication`: Template prompt menghasilkan teks deterministik, menyertakan seluruh atribut produk terverifikasi, dan memuat larangan keras pengadaan klaim fiktif (`PASS`).
+  7. `test_parse_and_validate_ai_draft_success`: Mem-parsing JSON output AI (termasuk yang dibungkus markdown codeblock) ke dalam model `ContentDraft` dan `list[Claim]` (`PASS`).
+  8. `test_parse_malformed_ai_output_fails_gracefully`: Output AI yang tidak terstruktur atau cacat skema memicu `ValueError` dengan keterangan jelas (`PASS`).
+  9. `test_unverified_claim_cannot_silently_become_verified`: Klaim berstatus `UNVERIFIED` tidak dapat berubah status hanya karena `source_ref` tidak kosong (`PASS`).
+  10. `test_pipeline_integration_with_imported_draft`: Draf yang diimpor dialirkan ke `run_pipeline`, berhasil dievaluasi kepatuhannya, dan berhenti pada status `waiting_approval` (`PASS`).
+  11. `test_cli_subcommands_smoke`: Smoke test terhadap seluruh subperintah CLI (`intake`, `prompt`, `import-draft`, `inspect`) berjalan sukses (`PASS`).
+
+---
+
+## 8. Verifikasi Human Review Gate, Migrasi Skema SQLite `compliance_reports`, dan Atomic Content Pack Export
+
+- **Tanggal Eksekusi:** 2026-11-02
+- **Lingkungan Pengujian:** `.venv\Scripts\python.exe` (Python 3.12.15) dengan standard library `unittest`
+- **Perintah Eksekusi:**
+  ```powershell
+  $env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -v
+  ```
+- **Exit Code:** `0`
+- **Output Terminal:**
+  ```text
+  Ran 35 tests in 1.189s
+
+  OK
+  ```
+- **Rincian Pengujian Baru (16 Test Cases pada `tests/test_review_and_export.py`):**
+  1. `test_approve_valid_waiting_draft`: Persetujuan draf yang valid pada status `waiting_approval` dengan seluruh klaim berstatus `VERIFIED` berhasil mengubah status ke `approved` dan mencatat event `human_approve` (`PASS`).
+  2. `test_approve_idempotent`: Menyetujui ulang draf yang sudah berstatus `approved` mengembalikan status sukses secara idempoten tanpa error (`PASS`).
+  3. `test_reject_eligible_draft_and_record_reason`: Penolakan draf pada status `waiting_approval` mencatat alasan penolakan dan event `human_reject` serta bersifat idempoten (`PASS`).
+  4. `test_reject_empty_reason_blocked`: Penolakan dengan alasan kosong atau spasi ditolak dengan `ReviewError` (`PASS`).
+  5. `test_prevent_approval_with_unresolved_claims`: Draf dengan klaim berstatus `UNVERIFIED` atau `SOURCED` (belum diverifikasi manusia) diblokir dari persetujuan (`PASS`).
+  6. `test_prevent_approval_with_rejected_claims`: Draf yang memiliki klaim yang telah ditolak (`REJECTED`) diblokir dari persetujuan (`PASS`).
+  7. `test_prevent_approval_with_blocking_compliance_findings`: Draf dengan laporan kepatuhan yang gagal (`passed == False`) diblokir dari persetujuan (`PASS`).
+  8. `test_prevent_invalid_state_transitions`: Menolak transisi ilegal (misal menyetujui draf yang ditolak, menolak draf yang sudah disetujui, atau menyetujui draf berstatus `draft`) (`PASS`).
+  9. `test_review_claim_individually`: Penelaahan klaim individual oleh manusia berhasil mengubah status menjadi `VERIFIED` dan mencatat event `review_claim` dengan catatan penelaah (`PASS`).
+  10. `test_prevent_export_of_unapproved_drafts`: Permintaan ekspor draf pada status `waiting_approval`, `rejected`, atau `draft` ditolak oleh gerbang ekspor (`ExportGateError`) (`PASS`).
+  11. `test_export_approved_draft_and_validate_all_files`: Ekspor draf `approved` menghasilkan seluruh 6 berkas (`script.md`, `caption.txt`, `hashtags.txt`, `product_info.json`, `review_checklist.md`, `manifest.json`) dengan checksum SHA-256 terverifikasi (`PASS`).
+  12. `test_reject_path_traversal_in_draft_id`: Upaya path traversal pada draft ID (`..`, separator path, karakter ilegal) ditolak oleh fungsi sanitasi (`PASS`).
+  13. `test_handle_output_collisions_safely`: Direktori ekspor yang sudah ada menolak penimpaan tanpa bendera `--overwrite`, dan berhasil menimpa jika bendera `--overwrite` diberikan (`PASS`).
+  14. `test_failed_export_leaves_no_misleading_pack_or_event`: Kegagalan penulisan saat staging tidak meninggalkan berkas paket parsial dan tidak mencatat event sukses ekspor (`PASS`).
+  15. `test_database_migration_compliance_reports`: Database legacy dengan primary key tunggal `draft_id` termigrasi secara transparan menjadi komposit `(draft_id, prompt_version)` tanpa kehilangan data legacy dan mendukung multiversi (`PASS`).
+  16. `test_cli_review_and_export_smoke`: Smoke test terhadap seluruh subperintah CLI `review show`, `review claim`, `review approve`, `review reject`, dan `export` berjalan dengan exit code 0 (`PASS`).

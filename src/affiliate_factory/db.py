@@ -55,6 +55,32 @@ class Database:
         conn = self.get_connection()
         try:
             with conn:
+                # Check for legacy compliance_reports schema without prompt_version
+                table_check = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='compliance_reports'"
+                ).fetchone()
+                if table_check:
+                    cols = {
+                        row["name"]
+                        for row in conn.execute("PRAGMA table_info(compliance_reports)").fetchall()
+                    }
+                    if "prompt_version" not in cols:
+                        conn.executescript(
+                            """
+                            CREATE TABLE compliance_reports_v2 (
+                                draft_id TEXT NOT NULL,
+                                prompt_version TEXT NOT NULL DEFAULT 'v1.0',
+                                passed INTEGER NOT NULL,
+                                findings_json TEXT NOT NULL,
+                                PRIMARY KEY (draft_id, prompt_version)
+                            );
+                            INSERT INTO compliance_reports_v2 (draft_id, prompt_version, passed, findings_json)
+                            SELECT draft_id, 'v1.0', passed, findings_json FROM compliance_reports;
+                            DROP TABLE compliance_reports;
+                            ALTER TABLE compliance_reports_v2 RENAME TO compliance_reports;
+                            """
+                        )
+
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS products (
@@ -92,9 +118,11 @@ class Database:
                     );
 
                     CREATE TABLE IF NOT EXISTS compliance_reports (
-                        draft_id TEXT PRIMARY KEY,
+                        draft_id TEXT NOT NULL,
+                        prompt_version TEXT NOT NULL DEFAULT 'v1.0',
                         passed INTEGER NOT NULL,
-                        findings_json TEXT NOT NULL
+                        findings_json TEXT NOT NULL,
+                        PRIMARY KEY (draft_id, prompt_version)
                     );
 
                     CREATE TABLE IF NOT EXISTS performance_records (
@@ -281,31 +309,39 @@ class Database:
             with conn:
                 conn.execute(
                     """
-                    INSERT INTO compliance_reports (draft_id, passed, findings_json)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(draft_id) DO UPDATE SET
+                    INSERT INTO compliance_reports (draft_id, prompt_version, passed, findings_json)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(draft_id, prompt_version) DO UPDATE SET
                         passed=excluded.passed,
                         findings_json=excluded.findings_json
                     """,
-                    (report.draft_id, 1 if report.passed else 0, json.dumps(findings_data)),
+                    (report.draft_id, report.prompt_version, 1 if report.passed else 0, json.dumps(findings_data)),
                 )
         finally:
             if self._conn_str != ":memory:":
                 conn.close()
 
-    def get_compliance_report(self, draft_id: str) -> ComplianceReport | None:
+    def get_compliance_report(self, draft_id: str, prompt_version: str | None = None) -> ComplianceReport | None:
         conn = self.get_connection()
         try:
-            cursor = conn.execute(
-                "SELECT * FROM compliance_reports WHERE draft_id = ?",
-                (draft_id,),
-            )
+            if prompt_version is not None:
+                cursor = conn.execute(
+                    "SELECT * FROM compliance_reports WHERE draft_id = ? AND prompt_version = ?",
+                    (draft_id, prompt_version),
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT * FROM compliance_reports WHERE draft_id = ? ORDER BY prompt_version DESC LIMIT 1",
+                    (draft_id,),
+                )
             row = cursor.fetchone()
             if not row:
                 return None
             findings_list = json.loads(row["findings_json"])
+            ver = row["prompt_version"] if "prompt_version" in row.keys() else "v1.0"
             return ComplianceReport(
                 draft_id=row["draft_id"],
+                prompt_version=ver,
                 passed=bool(row["passed"]),
                 findings=[ComplianceFinding(**f) for f in findings_list],
             )
@@ -329,6 +365,38 @@ class Database:
                         """,
                         (c.id, c.draft_id, c.text, c.source_ref, c.verification_status),
                     )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def get_claim(self, claim_id: str) -> Claim | None:
+        conn = self.get_connection()
+        try:
+            cursor = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return Claim(
+                id=row["id"],
+                draft_id=row["draft_id"],
+                text=row["text"],
+                source_ref=row["source_ref"],
+                verification_status=row["verification_status"],
+            )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def update_claim_status(self, claim_id: str, verification_status: str) -> bool:
+        """Update verification status of an existing claim. Returns True if updated, False if not found."""
+        conn = self.get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "UPDATE claims SET verification_status = ? WHERE id = ?",
+                    (verification_status, claim_id),
+                )
+                return cursor.rowcount > 0
         finally:
             if self._conn_str != ":memory:":
                 conn.close()

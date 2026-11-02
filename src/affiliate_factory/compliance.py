@@ -134,6 +134,7 @@ def check_compliance(
 
     report = ComplianceReport(
         draft_id=draft.id,
+        prompt_version=draft.prompt_version,
         passed=passed,
         findings=findings,
     )
