@@ -404,35 +404,69 @@ class TestPhase11Isolation(unittest.TestCase):
 
     def test_symlink_target_rejection(self) -> None:
         """If the target content pack directory is a symlink, export must be rejected."""
-        draft = ContentDraft(
-            id="draft_symlink_test",
-            product_id=self.product.id,
-            angle="Angle",
-            hook="Hook",
-            script="Script",
-            caption="Caption #ShopeeAffiliate #KontenAI",
-            cta="CTA",
-            disclosure_text="#ShopeeAffiliate #KontenAI",
-            status="approved",
-            prompt_version="v1.0",
-        )
-        self.db.upsert_draft(draft)
-        self.db.save_compliance_report(
-            ComplianceReport(draft_id="draft_symlink_test", prompt_version="v1.0", passed=True)
-        )
-
         packs_dir = Path(self.temp_dir.name) / "symlink_packs"
+        packs_dir.mkdir()
+        real_target = packs_dir / "real_target"
+        real_target.mkdir()
         target_dir = packs_dir / "draft_symlink_test"
+        try:
+            target_dir.symlink_to(real_target, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Filesystem symlink creation is unavailable: {exc}")
 
-        with patch.object(Path, "is_symlink", return_value=True):
-            with self.assertRaises(ValueError) as ctx:
-                export_content_pack(
-                    self.db,
-                    draft_id="draft_symlink_test",
-                    prompt_version="v1.0",
-                    base_output_dir=packs_dir,
-                )
-            self.assertIn("symlink", str(ctx.exception).lower())
+        with self.assertRaises(ValueError) as ctx:
+            export_content_pack(
+                self.db,
+                draft_id="draft_symlink_test",
+                prompt_version="v1.0",
+                base_output_dir=packs_dir,
+            )
+        self.assertIn("symlink", str(ctx.exception).lower())
+        self.assertTrue(target_dir.is_symlink())
+        self.assertTrue(real_target.exists())
+
+    def test_symlink_target_to_outside_base_is_rejected(self) -> None:
+        packs_dir = Path(self.temp_dir.name) / "symlink_outside_packs"
+        outside_dir = Path(self.temp_dir.name) / "outside_target"
+        packs_dir.mkdir()
+        outside_dir.mkdir()
+        target_dir = packs_dir / "draft_symlink_outside"
+        try:
+            target_dir.symlink_to(outside_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Filesystem symlink creation is unavailable: {exc}")
+
+        with self.assertRaises(ValueError):
+            export_content_pack(self.db, "draft_symlink_outside", base_output_dir=packs_dir)
+        self.assertTrue(target_dir.is_symlink())
+        self.assertTrue(outside_dir.exists())
+
+    def test_broken_symlink_target_is_rejected(self) -> None:
+        packs_dir = Path(self.temp_dir.name) / "broken_symlink_packs"
+        packs_dir.mkdir()
+        target_dir = packs_dir / "draft_broken_symlink"
+        missing_target = packs_dir / "missing_target"
+        try:
+            target_dir.symlink_to(missing_target, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Filesystem symlink creation is unavailable: {exc}")
+
+        with self.assertRaises(ValueError):
+            export_content_pack(self.db, "draft_broken_symlink", base_output_dir=packs_dir)
+        self.assertTrue(target_dir.is_symlink())
+        self.assertFalse(missing_target.exists())
+
+    def test_parent_directory_symlink_is_resolved_before_target_check(self) -> None:
+        real_base = Path(self.temp_dir.name) / "real_base"
+        real_base.mkdir()
+        linked_base = Path(self.temp_dir.name) / "linked_base"
+        try:
+            linked_base.symlink_to(real_base, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Filesystem symlink creation is unavailable: {exc}")
+
+        with self.assertRaises(ExportGateError):
+            export_content_pack(self.db, "draft_under_parent_symlink", base_output_dir=linked_base)
 
     def test_database_migration_claims_prompt_version(self) -> None:
         """Legacy claims table without prompt_version must migrate safely without data loss.

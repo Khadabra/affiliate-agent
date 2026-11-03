@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from affiliate_factory.cli import main
 from affiliate_factory.db import Database
@@ -442,7 +443,7 @@ class TestReviewAndExport(unittest.TestCase):
         # Simulate missing product to trigger failure during staging
         bad_draft = ContentDraft(
             id="draft_missing_prod",
-            product_id="prod_non_existent",
+            product_id=self.sample_product.id,
             angle="Angle",
             hook="Hook",
             script="Script",
@@ -457,8 +458,9 @@ class TestReviewAndExport(unittest.TestCase):
             ComplianceReport(draft_id="draft_missing_prod", prompt_version="v1.0", passed=True)
         )
 
-        with self.assertRaises(ExportGateError):
-            export_content_pack(self.db, "draft_missing_prod", base_output_dir=packs_dir)
+        with patch.object(self.db, "get_product", return_value=None):
+            with self.assertRaises(ExportGateError):
+                export_content_pack(self.db, "draft_missing_prod", base_output_dir=packs_dir)
 
         # Target directory must NOT exist
         target_dir = packs_dir / "draft_missing_prod"

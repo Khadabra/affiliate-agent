@@ -6,9 +6,11 @@ claims, compliance, performance recording, and event logging.
 
 from __future__ import annotations
 
+import ipaddress
 import math
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -34,8 +36,47 @@ class Product(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        if not (v.startswith("http://") or v.startswith("https://")):
+        if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in v):
+            raise ValueError("Product URL must not contain whitespace or control characters")
+
+        try:
+            parsed = urlsplit(v)
+        except ValueError as exc:
+            raise ValueError(f"Product URL is malformed: {exc}") from exc
+
+        if parsed.scheme.lower() not in {"http", "https"}:
             raise ValueError("Product URL must start with http:// or https://")
+
+        if not parsed.hostname:
+            raise ValueError("Product URL must contain a valid hostname")
+
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Product URL must not contain username or password credentials")
+
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError(f"Product URL contains an invalid port: {exc}") from exc
+
+        hostname = parsed.hostname
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            normalized_hostname = hostname.rstrip(".")
+            if (
+                not normalized_hostname
+                or len(normalized_hostname) > 253
+                or any(
+                    not label
+                    or len(label) > 63
+                    or label.startswith("-")
+                    or label.endswith("-")
+                    or any(not (character.isalnum() or character == "-") for character in label)
+                    for label in normalized_hostname.split(".")
+                )
+            ):
+                raise ValueError("Product URL must contain a valid hostname")
+
         return v
 
 

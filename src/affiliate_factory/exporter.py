@@ -89,17 +89,19 @@ def export_content_pack(
     safe_draft_id = sanitize_draft_id(draft_id)
 
     base_dir = Path(base_output_dir).resolve()
-    target_dir = (base_dir / safe_draft_id).resolve()
+    raw_target_dir = base_dir / safe_draft_id
+
+    # Check the unresolved target first so resolve() cannot hide a symlink.
+    if raw_target_dir.is_symlink():
+        raise ValueError(f"Target path '{raw_target_dir}' is a symlink. Symlinks are not permitted for content packs.")
+
+    target_dir = raw_target_dir.resolve()
 
     # Path traversal protection via relative_to
     try:
         target_dir.relative_to(base_dir)
     except ValueError:
         raise ValueError(f"Target path '{target_dir}' escapes base directory '{base_dir}'.")
-
-    # Symlink protection
-    if target_dir.is_symlink():
-        raise ValueError(f"Target path '{target_dir}' is a symlink. Symlinks are not permitted for content packs.")
 
     # 1. Fetch draft and check status
     draft = db.get_draft(draft_id, prompt_version)

@@ -8,14 +8,40 @@ Dokumen ini memuat status kerja terkini proyek **AI Affiliate Content Factory** 
 Membangun sistem semi-otomatis modular untuk memproduksi, mengaudit kepatuhan, dan melacak konversi konten afiliasi Shopee Indonesia berbasis Python deterministik, penyimpanan lokal SQLite, dan persetujuan manusia.
 
 ## 2. Fase Saat Ini
-**Phase 2.2.1 Selesai Penuh** — Perbaikan integritas analitik dan penasihat naskah (`Analytics & Advisor Integrity Fix`) telah selesai dan terverifikasi penuh:
-1. **Preservasi Semantik None vs Nol:** Metrik yang tidak tercatat bernilai `None` dan secara konsisten diformat sebagai `N/A` atau `[tidak diketahui]`, bukan `0.00%` atau `0 pesanan`. Nilai pesanan nol (`orders == 0`) yang benar-benar tercatat tetap dibedakan dari nilai yang tidak diketahui (`orders is None`).
-2. **Kelayakan Pemeringkatan (Ranking Eligibility):** Angle yang tidak memiliki metrik valid untuk kriteria pengurutan yang dipilih (`--sort-by`) tidak diberi peringkat menyesatkan, melainkan dipisahkan ke `unranked_missing_metric_angles` dengan `rank=None` dan catatan kualitas data transparan.
-3. **Pemisahan Kategori Angle:** Memisahkan secara tegas: (a) angle yang memenuhi syarat pemeringkatan (`ranked_angles`), (b) angle yang memiliki data tetapi metrik sort tidak tersedia (`unranked_missing_metric_angles`), dan (c) angle tanpa data performa sama sekali (`unranked_angles`).
-4. **Integritas Bukti Advisor:** CopywritingAdvisor dilarang mengklaim angle sebagai pemenang konversi jika data pesanan/konversi belum tersedia, dan merekomendasikan eksplorasi pengumpulan data.
-5. **Netralitas Template Advisor:** Seluruh asumsi komersial tanpa sumber (seperti "harga promo", "garansi resmi", "voucher toko", "keranjang kuning") telah dibersihkan dari template advisor, digantikan dengan draf hipotesis netral berstatus DRAFT di bawah kontrol Review Gate manusia.
-6. **Validasi Parameter:** Parameter `--min-samples` divalidasi ketat (`> 0`); nilai nol atau negatif ditolak deterministik pada modul `AngleRanker` dan CLI.
-Seluruh 94 unit test lolos pengujian tanpa error (`exit code 0`).
+**Phase 3.3 Selesai Implementasi & Verifikasi** — Specialist agents deterministic/manual-first telah dibangun di atas fondasi Phase 3.1–3.2:
+1. **Specialists:** Research, Content Writer, Fact Checker, Compliance, Human Approval Gate, Export, dan Analytics tersedia sebagai `BaseAgent` terdaftar.
+2. **Default workflow:** Research → Content Writer → Fact Checker → Compliance → Human Approval → Export; Analytics tetap terpisah.
+3. **Evidence safety:** Research mempertahankan provenance; Writer hanya memakai fakta supported; Fact Checker tidak menandai klaim sebagai verified otomatis; Compliance menggunakan engine fail-closed existing.
+4. **Human approval:** Workflow berhenti pada approval pause; resume membutuhkan keputusan eksplisit; Export memanggil existing human claim review dan `approve_draft` sebelum exporter.
+5. **Preflight:** Symlink guard lulus inspeksi code tetapi 4 test filesystem tetap environmental skip `WinError 1314`; in-memory sink failure kini recoverable tanpa duplicate task.
+6. **Hasil:** 8 test specialist, 57 impacted test, dan full suite 138 test exit code 0; 4 test symlink tetap di-skip.
+
+Phase 3.2 sebelumnya telah menyelesaikan Workflow Orchestrator multi-agent:
+1. **Workflow definitions:** `WorkflowDefinition` memvalidasi step, dependency graph, agent ID/capability, input/output mapping, retry, dan version.
+2. **Coordination:** `WorkflowExecutor` menjalankan task sekuensial sesuai dependency, meneruskan output tervalidasi, memblokir downstream saat gagal, dan melindungi duplicate execution.
+3. **Retry & recovery:** hanya error type yang dikonfigurasi yang diulang; validation error tidak diulang; execution non-terminal dapat di-recover dengan deterministic task IDs.
+4. **Human approval:** step approval mem-pause workflow; hanya keputusan eksplisit `APPROVE` yang melanjutkan dan `REJECT` yang menghentikan; tidak ada automatic approval.
+5. **Persistence & events:** state workflow/step dan event SQLite default ditulis atomik per operasi; in-memory sink tetap didukung dengan guarantee terpisah yang terdokumentasi.
+6. **Hasil:** 8 test Phase 3.2, 21 test Phase 3.1+3.2, dan full suite 129 test sebelum Phase 3.3 exit code 0; 4 test symlink lama tetap di-skip karena `WinError 1314`.
+
+Phase 3.1 sebelumnya telah menyelesaikan fondasi Modular Agent Architecture:
+1. **Kontrak & eksekusi:** `AgentTask`, `AgentResult`, `AgentEvent`, metadata, `BaseAgent`, registry, execution context, dan sequential agent orchestrator tersedia dengan validasi Pydantic.
+2. **Lifecycle & observability:** transisi `idle → queued → running → completed|failed` divalidasi; event lifecycle terurut, berkorelasi, dan dapat dipersistenkan.
+3. **Provider boundary:** provider abstraction siap untuk implementasi lokal/eksternal; provider tidak tersedia, timeout, dan error ditangani typed; tidak ada paid API baru.
+4. **Persistence:** tabel aditif `agent_tasks` dan `agent_events` memakai SQLite existing dengan FK aktif; tidak ada database produksi yang digunakan.
+
+Phase 2.2.3 sebelumnya telah menyelesaikan verifikasi end-to-end workflow utama:
+1. **Workflow sukses:** Intake → Prompt → Import Draft → Claim Review → Compliance → Human Approval → Export → Performance Recording → Analytics berhasil dijalankan pada database dan filesystem temporary.
+2. **Failure paths:** Compliance violation, unsupported claim, export sebelum approval, rejected export, invalid product, dan invalid draft ditolak tanpa partial record yang merusak.
+3. **Repeatability & analytics:** Intake/import berulang tidak menggandakan identitas; snapshot terbaru tidak double-counted; platform dipisahkan; correction dan ranking dapat ditelusuri.
+4. **Hasil:** 3 integration test dan full suite 108 test exit code 0; 4 test symlink filesystem di-skip karena Windows mengembalikan `WinError 1314`.
+
+Phase 2.2.2 sebelumnya telah menerapkan perbaikan keamanan dan integritas data:
+1. **Compliance fail-closed:** Konfigurasi compliance yang hilang, malformed, unreadable, atau berskema tidak valid menghasilkan report gagal dan memblokir pipeline sebelum approval.
+2. **Validasi URL:** Product URL dibatasi ke HTTP/HTTPS dengan hostname valid; whitespace/control character, credential, host malformed, dan port invalid ditolak.
+3. **SQLite foreign keys:** `PRAGMA foreign_keys = ON` diterapkan pada setiap koneksi file dan memory tanpa mengubah schema.
+4. **Proteksi symlink exporter:** Target mentah diperiksa sebelum canonical resolution dan containment validation tetap dipertahankan.
+Seluruh 105 unit test selesai dengan exit code 0; 4 test symlink filesystem di-skip karena Windows mengembalikan `WinError 1314` saat pembuatan symlink.
 
 ## 3. Daftar Selesai & Riwayat Commit
 - `1463915`: Inisialisasi Git, `.gitignore`, dan dokumen piagam tata kelola proyek.
@@ -29,7 +55,12 @@ Seluruh 94 unit test lolos pengujian tanpa error (`exit code 0`).
 - `67799ad`: Phase 2.1 — Data Integrity & Analytics Hardening: immutabilitas snapshot historis, subperintah `performance correct`, rasio konversi agregat berbasis kohort lengkap, normalisasi UTC, determinisme tie-breaking, penolakan `NaN`/`Inf`, dan pemberitahuan parsial CLI (65 unit test).
 - `93dbdec`: Phase 2.1.1 — Performance Correction Auditability: koreksi snapshot atomik transaksional dengan audit payload sebelum/sesudah lengkap, proteksi rollback saat audit gagal, dan penelusuran sekuensial (71 unit test).
 - `271007d`: Phase 2.2 — Angle Ranker & Copywriting Advisor: pemeringkatan angle deterministik berbobot, isolasi lintas platform, deduplikasi snapshot kumulatif, penanganan draf ambigu, pelabelan bukti sampel minimum, modul rekomendasi copywriting, dan subperintah CLI `performance angles` (86 unit test).
-- `Phase 2.2.1 (Saat Ini)`: Analytics & Advisor Integrity Fix: preservasi semantik None vs 0, kelayakan pemeringkatan berbasis metrik valid sort_by, pemisahan unranked_missing_metric_angles, pembersihan asumsi komersial template advisor, validasi parameter min_samples (94 unit test).
+- `Phase 2.2.1`: Analytics & Advisor Integrity Fix: preservasi semantik None vs 0, kelayakan pemeringkatan berbasis metrik valid sort_by, pemisahan unranked_missing_metric_angles, pembersihan asumsi komersial template advisor, validasi parameter min_samples (94 unit test).
+- `Phase 2.2.2 (Implementasi Lokal)`: Security & Data Integrity Hardening: compliance fail-closed, validasi URL berbasis parsing, SQLite foreign key enforcement per koneksi, dan pemeriksaan symlink exporter sebelum resolve (105 unit test, 4 skip symlink karena privilege Windows).
+- `Phase 2.2.3 (Verifikasi Workflow)`: Integration test CLI end-to-end untuk alur intake sampai analytics, failure paths, repeatability, platform separation, dan correction (108 unit test, 4 skip symlink karena privilege Windows).
+- `Phase 3.1 (Agent Foundation)`: Kontrak Pydantic, base agent, registry, execution context, provider abstraction, sequential agent orchestrator, lifecycle events, dan persistence SQLite aditif (120 test, 4 skip symlink karena privilege Windows).
+- `Phase 3.2 (Workflow Orchestrator)`: Workflow definitions, dependency-aware sequential executor, mappings, retry/recovery, human approval pause/resume, workflow events, dan persistence transaksi SQLite (129 test, 4 skip symlink karena privilege Windows).
+- `Phase 3.3 (Specialist Agents)`: Research, Content Writer, Fact Checker, Compliance, Human Approval Gate, Export, Analytics, default content workflow, in-memory recovery hardening, dan pre-flight symlink verification (138 test, 4 skip symlink karena privilege Windows).
 
 ## 4. Keputusan Terkunci
 1. **Runtime:** Python 3.12 pada `.venv` lokal menggunakan `uv`.
@@ -49,7 +80,7 @@ Seluruh 94 unit test lolos pengujian tanpa error (`exit code 0`).
 3. Korelasi antara angle naskah promosi dan tingkat konversi masih membutuhkan data empiris yang lebih besar untuk menghasilkan kesimpulan statistik valid.
 
 ## 6. Tugas Berikutnya (Hanya Satu)
-> **Membangun modul generator variasi prompt dan naskah draf otomatis (`PromptVariantGenerator`) berdasarkan rekomendasi `CopywritingAdvisor`, dengan integrasi ke template prompt terstruktur dan alur penelaahan Review Gate.**
+> **Phase 3.4: evaluasi kontrak specialist-agent terhadap kebutuhan Dashboard/Agent Office read model tanpa menambahkan UI atau API eksternal.**
 
 ## 7. Larangan Keras
 - Dilarang scraping antarmuka web Shopee atau membypass mekanisme proteksi bot.

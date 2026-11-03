@@ -478,4 +478,154 @@ Audit terhadap implementasi Phase 2.2 mengidentifikasi beberapa area integritas 
   20. `test_ranking_correct_for_all_sort_by_options`: Memastikan pemeringkatan deterministik berjalan tepat untuk seluruh opsi sort (`click_to_order`, `ctr`, `views`, `orders`, `commission`) (`PASS`).
   21. `test_sufficient_content_samples_without_conversion_data_does_not_trigger_winner`: Memastikan sampel konten yang cukup tanpa data konversi tidak memicu klaim pemenang konversi (`PASS`).
   22. `test_advisor_suggestions_contain_no_unverified_commercial_assumptions`: Memastikan saran advisor bebas dari asumsi komersial tanpa sumber ("promo", "garansi", "voucher", "diskon", "keranjang kuning") (`PASS`).
-  23. `test_min_samples_zero_and_negative_rejected`: Memastikan nilai `--min-samples` nol dan negatif ditolak dengan pesan kesalahan (`PASS`).
+23. `test_min_samples_zero_and_negative_rejected`: Memastikan nilai `--min-samples` nol dan negatif ditolak dengan pesan kesalahan (`PASS`).
+
+---
+
+## 15. Phase 2.2.2 — Security & Data Integrity Hardening (2026-11-03)
+
+### Perubahan Terverifikasi Secara Statis
+1. **Compliance fail-closed:** konfigurasi hilang, malformed, unreadable, atau berskema tidak valid menghasilkan `ComplianceReport(passed=False)` dengan finding `RULE-COMPLIANCE-CONFIG-01` ber-severity `ERROR`; pipeline berakhir `rejected` dan tidak dapat mencapai approval.
+2. **Product URL validation:** hanya scheme HTTP/HTTPS dengan hostname valid yang diterima; whitespace/control character, credential, host malformed, dan port invalid ditolak tanpa network access.
+3. **SQLite foreign keys:** `PRAGMA foreign_keys = ON` diaktifkan pada setiap koneksi file dan `:memory:`. Schema tidak diperluas.
+4. **Exporter symlink protection:** target mentah diperiksa dengan `is_symlink()` sebelum `resolve()`, lalu containment tetap diverifikasi dengan `relative_to()`.
+
+### Pemeriksaan Database Existing
+- Default database `data/affiliate_factory.db` tidak ada.
+- Direktori `data/` tidak ada.
+- Tidak ada data existing yang dimigrasikan, dihapus, atau diubah.
+
+### Targeted Regression Tests
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase2_2_2_security tests.test_phase1_1_isolation tests.test_review_and_export`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 36 tests in 1.762s`; `OK (skipped=4)`.
+- **Skip:** empat test filesystem symlink tidak dapat membuat symlink pada Windows karena `WinError 1314` (privilege/Developer Mode); test tidak diganti mock.
+
+### Full Test Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py' -v`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 105 tests in 4.119s`; `OK (skipped=4)`.
+- **Catatan:** empat skip symlink sama dengan targeted run; seluruh test lain lulus.
+
+---
+
+## 16. Phase 2.2.3 — End-to-End Workflow Verification (2026-11-03)
+
+### Cakupan Integration Test
+- `tests/test_phase2_2_3_workflow.py` menjalankan CLI nyata dengan SQLite temporary dan filesystem temporary.
+- Skenario sukses mencakup intake, prompt, import draft, claim review, compliance, human approval, export enam file, performance recording, correction, analytics, platform separation, ranking, dan repeatability.
+- Skenario gagal mencakup compliance violation, approval/export bypass, unsupported claim, invalid product, invalid draft, serta pencegahan partial record.
+- Tidak ada mock API eksternal atau klaim bahwa integrasi Shopee/AI eksternal berjalan.
+
+### Hasil Integration Test
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase2_2_3_workflow`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 3 tests in 0.574s`; `OK`.
+
+### Hasil Suite Terdampak
+- **Exit Code:** `0`
+- **Hasil:** `Ran 107 tests`; `OK (skipped=4)`.
+
+### Full Test Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py' -v`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 108 tests in 5.000s`; `OK (skipped=4)`.
+- **Skip:** empat test symlink filesystem tetap tidak dapat membuat symlink pada Windows karena `WinError 1314`; tidak diganti mock.
+- **Database produksi:** tidak digunakan atau diubah. Seluruh integration test memakai database temporary.
+
+---
+
+## 17. Phase 3.1 — Agent Foundation (2026-11-03)
+
+### Implementasi
+- Menambahkan kontrak Pydantic untuk metadata agent, `AgentTask`, `AgentResult`, `AgentEvent`, status lifecycle, dan structured error.
+- Menambahkan `BaseAgent`, `AgentRegistry`, `ExecutionContext`, event sinks in-process/SQLite, `AgentOrchestrator`, serta provider abstraction yang membungkus `LLMAdapter` tanpa mengklaim integrasi AI eksternal.
+- Menambahkan tabel SQLite aditif `agent_tasks` dan `agent_events`; event memiliki FK ke task dan urutan insertion eksplisit.
+- `src/affiliate_factory/orchestrator.py` tidak diganti dan workflow CLI existing tetap digunakan.
+
+### Test Phase 3.1
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase3_1_agents`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 12 tests in 0.660s`; `OK`.
+- **Cakupan:** registry, duplicate/unknown lookup, input/output validation, lifecycle transitions, success/failure execution, invalid output, event ordering/correlation, provider unavailable/timeout/error, context isolation, FK persistence, dan repeated task IDs.
+
+### Suite Terdampak
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase3_1_agents tests.test_core tests.test_phase1_mvp`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 29 tests in 1.209s`; `OK`.
+
+### Full Test Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py' -v`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 120 tests in 6.697s`; `OK (skipped=4)`.
+- **Passed:** 116; **Failed:** 0; **Skipped:** 4.
+- **Skip:** empat test symlink existing tetap `WinError 1314` karena privilege symlink Windows tidak tersedia.
+- **Database produksi:** tidak digunakan atau diubah; seluruh test agent memakai SQLite temporary atau `:memory:`.
+
+---
+
+## 18. Phase 3.2 — Workflow Orchestrator & Multi-Agent Coordination (2026-11-03)
+
+### Implementasi
+- Menambahkan `WorkflowDefinition`, `WorkflowStep`, execution request/result, step result, lifecycle status, approval decision, dan structured workflow events.
+- Menambahkan `WorkflowExecutor` sekuensial dengan dependency ordering, agent ID/capability resolution, input/output mapping, retry deterministik, duplicate execution protection, failure propagation, dan recovery.
+- Menambahkan pause/resume human approval eksplisit; `APPROVE` melanjutkan, `REJECT` menghasilkan `rejected`; tidak ada automatic approval.
+- Menambahkan persistence SQLite aditif untuk workflow executions, step state, dan workflow events dengan FK, explicit transactions, workflow definition snapshot, dan stale transition protection.
+- Memperkuat Phase 3.1 task/event persistence agar default SQLite sink menyimpan task state dan lifecycle event dalam transaksi yang sama.
+
+### Test Phase 3.2
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase3_2_workflow`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 8 tests`; `OK`.
+- **Cakupan:** workflow definition/graph, capability resolution, sequential mapping, dependency blocking, unknown agent, retry transient, no retry validation, duplicate execution, human approval pause/resume/reject, durable events, persistence failure recovery, correlation IDs.
+
+### Phase 3.1 + Phase 3.2 Targeted Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase3_1_agents tests.test_phase3_2_workflow`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 21 tests in 2.128s`; `OK`.
+- **Tambahan regression:** task creation rollback saat first event gagal dan workflow state/event recovery.
+
+### Full Test Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py' -v`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 129 tests in 7.540s`; `OK (skipped=4)`.
+- **Passed:** 125; **Failed:** 0; **Skipped:** 4.
+- **Skip:** empat test symlink existing tetap `WinError 1314` karena privilege symlink Windows tidak tersedia.
+- **Database produksi:** tidak digunakan atau diubah; workflow tests memakai SQLite temporary dan `:memory:`.
+
+---
+
+## 19. Phase 3.3 — Specialist Agents & Pre-flight Security Verification (2026-11-03)
+
+### Pre-flight A1 — Windows Symlink Security
+- **Inspeksi implementasi:** exporter memeriksa `raw_target_dir.is_symlink()` sebelum `resolve()` dan tetap melakukan containment validation.
+- **Perintah targeted:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase1_1_isolation.TestPhase11Isolation.test_symlink_target_rejection tests.test_phase1_1_isolation.TestPhase11Isolation.test_symlink_target_to_outside_base_is_rejected tests.test_phase1_1_isolation.TestPhase11Isolation.test_broken_symlink_target_is_rejected tests.test_phase1_1_isolation.TestPhase11Isolation.test_parent_directory_symlink_is_resolved_before_target_check`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 4 tests`; `OK (skipped=4)`.
+- **Error aktual:** seluruh pembuatan symlink gagal dengan `WinError 1314: A required privilege is not held by the client`.
+- **Pemeriksaan tambahan:** `fsutil behavior query SymlinkEvaluation` menunjukkan local-to-local symlink evaluation `ENABLED`.
+- **Klasifikasi:** `ENVIRONMENTAL LIMITATION`; tidak ditemukan defect pada guard exporter; test tidak diganti mock.
+
+### Pre-flight A2 — In-memory Event Sink Recovery
+- **Perubahan aman:** failure pada injected in-memory event sink dipropagasikan sebagai `WorkflowPersistenceError`; state non-terminal tetap dapat dipulihkan.
+- **Regression test:** `test_in_memory_event_sink_failure_preserves_non_terminal_recovery_without_duplicate_task`.
+- **Guarantee:** SQLite state/event atomic per operasi; cross-storage atomicity tidak diklaim; recovery memakai persisted task result/ID untuk mencegah duplikasi.
+
+### Specialist Tests
+- **Perintah targeted:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase3_3_specialists`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 8 tests in 1.019s`; `OK`.
+- **Cakupan:** contracts, registry/capabilities, provenance, unsupported/missing claims, content writer research usage, fact classifications, compliance fail-closed, analytics missing metrics, full approval/export workflow, and manual/provider boundary.
+
+### Impacted Regression Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest -v tests.test_phase3_3_specialists tests.test_phase3_2_workflow tests.test_phase3_1_agents tests.test_phase2_2_2_security tests.test_phase2_2_3_workflow tests.test_review_and_export`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 57 tests in 3.899s`; `OK`.
+
+### Full Test Suite
+- **Perintah harness:** `PYTHONPATH='src;.' ./.venv/Scripts/python.exe -m unittest discover -s tests -p 'test_*.py' -v`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 138 tests in 8.315s`; `OK (skipped=4)`.
+- **Passed:** 134; **Failed:** 0; **Skipped:** 4.
+- **Skip:** empat symlink filesystem tests karena `WinError 1314`.
+- **Database produksi:** tidak digunakan atau diubah; specialist tests menggunakan SQLite temporary atau `:memory:`.

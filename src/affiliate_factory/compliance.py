@@ -23,13 +23,29 @@ from affiliate_factory.models import (
 DEFAULT_CONFIG_PATH = Path("config") / "compliance_rules.json"
 
 
+class ComplianceConfigError(RuntimeError):
+    """Raised when compliance rules cannot be loaded safely."""
+
+
 def load_compliance_rules(config_path: Path | str = DEFAULT_CONFIG_PATH) -> list[dict]:
     path = Path(config_path)
-    if not path.exists():
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("rules", [])
+    if not path.is_file():
+        raise ComplianceConfigError(f"Compliance rules file not found: {path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ComplianceConfigError(f"Failed to read compliance rules from {path}: {exc}") from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+        raise ComplianceConfigError(
+            f"Compliance rules file has an invalid schema: {path} must contain a 'rules' list"
+        )
+    if any(not isinstance(rule, dict) for rule in data["rules"]):
+        raise ComplianceConfigError(f"Compliance rules file contains a non-object rule: {path}")
+
+    return data["rules"]
 
 
 def check_compliance(
@@ -57,7 +73,37 @@ def check_compliance(
     )
     db.append_event(start_event)
 
-    rules = load_compliance_rules(config_path)
+    try:
+        rules = load_compliance_rules(config_path)
+    except ComplianceConfigError as exc:
+        report = ComplianceReport(
+            draft_id=draft.id,
+            prompt_version=draft.prompt_version,
+            passed=False,
+            findings=[
+                ComplianceFinding(
+                    rule_id="RULE-COMPLIANCE-CONFIG-01",
+                    severity="ERROR",
+                    message=f"Compliance tidak dapat dievaluasi karena konfigurasi aturan gagal dimuat: {exc}",
+                )
+            ],
+        )
+        db.save_compliance_report(report)
+        db.append_event(
+            Event(
+                id=str(uuid.uuid4()),
+                ts=datetime.now(timezone.utc),
+                run_id=effective_run_id,
+                module="compliance",
+                action="check_compliance",
+                status="failed",
+                ref_type="draft_id",
+                ref_id=draft.id,
+                note=f"Compliance configuration failed closed: {exc}",
+            )
+        )
+        return report
+
     findings: list[ComplianceFinding] = []
 
     combined_text = f"{draft.hook} {draft.script} {draft.caption} {draft.cta} {draft.disclosure_text}".lower()
@@ -154,4 +200,3 @@ def check_compliance(
     db.append_event(finish_event)
 
     return report
-

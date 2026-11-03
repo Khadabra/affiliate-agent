@@ -20,6 +20,24 @@ from affiliate_factory.models import (
     PerformanceSnapshotState,
     Product,
 )
+from affiliate_factory.agent_contracts import (
+    AgentError,
+    AgentEvent,
+    AgentResult,
+    AgentTask,
+    TaskStatus,
+    ALLOWED_TASK_TRANSITIONS,
+)
+from affiliate_factory.workflow_contracts import (
+    WorkflowDefinition,
+    WorkflowEvent,
+    WorkflowExecutionRecord,
+    WorkflowExecutionRequest,
+    WorkflowStepResult,
+    WorkflowStepStatus,
+    WorkflowStatus,
+    ALLOWED_WORKFLOW_TRANSITIONS,
+)
 
 DEFAULT_DB_PATH = Path("data") / "affiliate_factory.db"
 
@@ -47,10 +65,12 @@ class Database:
             if self._conn is None:
                 self._conn = sqlite3.connect(":memory:")
                 self._conn.row_factory = sqlite3.Row
+                self._conn.execute("PRAGMA foreign_keys = ON")
             return self._conn
 
         conn = sqlite3.connect(self._conn_str)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def init_schema(self) -> None:
@@ -115,6 +135,19 @@ class Database:
                                     (single_pv, d_id),
                                 )
 
+                workflow_table_check = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_executions'"
+                ).fetchone()
+                if workflow_table_check:
+                    workflow_cols = {
+                        row["name"]
+                        for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
+                    }
+                    if "workflow_json" not in workflow_cols:
+                        conn.execute(
+                            "ALTER TABLE workflow_executions ADD COLUMN workflow_json TEXT NOT NULL DEFAULT '{}'"
+                        )
+
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS products (
@@ -174,7 +207,7 @@ class Database:
                     );
                     CREATE INDEX IF NOT EXISTS idx_perf_content_platform ON performance_records (content_id, platform, observed_at);
 
-                    CREATE TABLE IF NOT EXISTS events (
+                     CREATE TABLE IF NOT EXISTS events (
                         id TEXT PRIMARY KEY,
                         ts TEXT NOT NULL,
                         run_id TEXT NOT NULL,
@@ -183,9 +216,94 @@ class Database:
                         status TEXT NOT NULL,
                         ref_type TEXT NOT NULL,
                         ref_id TEXT NOT NULL,
-                        note TEXT
-                    );
-                    """
+                         note TEXT
+                     );
+
+                     CREATE TABLE IF NOT EXISTS agent_tasks (
+                         task_id TEXT PRIMARY KEY,
+                         agent_id TEXT NOT NULL,
+                         status TEXT NOT NULL,
+                         input_json TEXT NOT NULL,
+                         context_json TEXT NOT NULL,
+                         created_at TEXT NOT NULL,
+                         correlation_id TEXT NOT NULL,
+                         parent_task_id TEXT,
+                         started_at TEXT,
+                         completed_at TEXT,
+                         output_json TEXT NOT NULL DEFAULT '{}',
+                         error_json TEXT,
+                         execution_metadata_json TEXT NOT NULL DEFAULT '{}'
+                     );
+
+                     CREATE INDEX IF NOT EXISTS idx_agent_tasks_correlation
+                         ON agent_tasks (correlation_id);
+
+                     CREATE TABLE IF NOT EXISTS agent_events (
+                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                         event_id TEXT NOT NULL UNIQUE,
+                         task_id TEXT NOT NULL,
+                         agent_id TEXT NOT NULL,
+                         event_type TEXT NOT NULL,
+                         timestamp TEXT NOT NULL,
+                         payload_json TEXT NOT NULL,
+                         correlation_id TEXT NOT NULL,
+                         FOREIGN KEY (task_id) REFERENCES agent_tasks (task_id)
+                     );
+
+                     CREATE INDEX IF NOT EXISTS idx_agent_events_task
+                         ON agent_events (task_id, sequence);
+
+                     CREATE TABLE IF NOT EXISTS workflow_executions (
+                         execution_id TEXT PRIMARY KEY,
+                         workflow_id TEXT NOT NULL,
+                         workflow_version TEXT NOT NULL,
+                         status TEXT NOT NULL,
+                         input_json TEXT NOT NULL,
+                         output_json TEXT NOT NULL DEFAULT '{}',
+                         error_type TEXT,
+                         error_message TEXT,
+                         correlation_id TEXT NOT NULL,
+                         parent_execution_id TEXT,
+                         current_step_id TEXT,
+                         workflow_json TEXT NOT NULL DEFAULT '{}',
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL
+                     );
+
+                     CREATE INDEX IF NOT EXISTS idx_workflow_executions_correlation
+                         ON workflow_executions (correlation_id);
+
+                     CREATE TABLE IF NOT EXISTS workflow_steps (
+                         execution_id TEXT NOT NULL,
+                         step_id TEXT NOT NULL,
+                         status TEXT NOT NULL,
+                         task_id TEXT,
+                         attempts INTEGER NOT NULL DEFAULT 0,
+                         output_json TEXT NOT NULL DEFAULT '{}',
+                         error_type TEXT,
+                         error_message TEXT,
+                         updated_at TEXT NOT NULL,
+                         PRIMARY KEY (execution_id, step_id),
+                         FOREIGN KEY (execution_id) REFERENCES workflow_executions (execution_id)
+                     );
+
+                     CREATE TABLE IF NOT EXISTS workflow_events (
+                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                         event_id TEXT NOT NULL UNIQUE,
+                         execution_id TEXT NOT NULL,
+                         workflow_id TEXT NOT NULL,
+                         step_id TEXT,
+                         task_id TEXT,
+                         event_type TEXT NOT NULL,
+                         timestamp TEXT NOT NULL,
+                         payload_json TEXT NOT NULL,
+                         correlation_id TEXT NOT NULL,
+                         FOREIGN KEY (execution_id) REFERENCES workflow_executions (execution_id)
+                     );
+
+                     CREATE INDEX IF NOT EXISTS idx_workflow_events_execution
+                         ON workflow_events (execution_id, sequence);
+                     """
                 )
         finally:
             if self._conn_str != ":memory:":
@@ -927,6 +1045,541 @@ class Database:
                     ref_type=row["ref_type"],
                     ref_id=row["ref_id"],
                     note=row["note"],
+                )
+                for row in rows
+            ]
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    # --- Agent Foundation Persistence ---
+    def save_agent_task(self, task: AgentTask) -> None:
+        """Insert a new agent task; duplicate IDs fail instead of overwriting."""
+        conn = self.get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO agent_tasks (
+                        task_id, agent_id, status, input_json, context_json, created_at,
+                        correlation_id, parent_task_id, started_at, completed_at,
+                        output_json, error_json, execution_metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.task_id,
+                        task.agent_id,
+                        task.status.value,
+                        json.dumps(task.input_data, ensure_ascii=False, default=str),
+                        json.dumps(task.context, ensure_ascii=False, default=str),
+                        task.created_at.isoformat(),
+                        task.correlation_id,
+                        task.parent_task_id,
+                        task.started_at.isoformat() if task.started_at else None,
+                        task.completed_at.isoformat() if task.completed_at else None,
+                        "{}",
+                        None,
+                        "{}",
+                    ),
+                )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def update_agent_task(self, task: AgentTask, result: AgentResult | None = None) -> None:
+        """Persist lifecycle state and, when available, the terminal result."""
+        conn = self.get_connection()
+        try:
+            output_json = json.dumps(result.output_data, ensure_ascii=False, default=str) if result else "{}"
+            error_json = result.error.model_dump_json() if result and result.error else None
+            metadata_json = (
+                json.dumps(result.execution_metadata, ensure_ascii=False, default=str) if result else "{}"
+            )
+            with conn:
+                current_row = conn.execute(
+                    "SELECT status FROM agent_tasks WHERE task_id = ?", (task.task_id,)
+                ).fetchone()
+                if current_row is None:
+                    raise KeyError(f"Unknown agent task ID: '{task.task_id}'")
+                current_status = TaskStatus(current_row["status"])
+                if task.status != current_status and task.status not in ALLOWED_TASK_TRANSITIONS[current_status]:
+                    raise ValueError(
+                        f"Invalid persisted task transition: {current_status.value} -> {task.status.value}"
+                    )
+                cursor = conn.execute(
+                    """
+                    UPDATE agent_tasks SET
+                        status = ?, started_at = ?, completed_at = ?,
+                        output_json = ?, error_json = ?, execution_metadata_json = ?
+                    WHERE task_id = ?
+                    """,
+                    (
+                        task.status.value,
+                        task.started_at.isoformat() if task.started_at else None,
+                        task.completed_at.isoformat() if task.completed_at else None,
+                        output_json,
+                        error_json,
+                        metadata_json,
+                        task.task_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(f"Unknown agent task ID: '{task.task_id}'")
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def save_agent_task_with_event(self, task: AgentTask, event: AgentEvent) -> None:
+        """Atomically create an agent task and its first event."""
+        conn = self.get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO agent_tasks (
+                        task_id, agent_id, status, input_json, context_json, created_at,
+                        correlation_id, parent_task_id, started_at, completed_at,
+                        output_json, error_json, execution_metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', NULL, '{}')
+                    """,
+                    (
+                        task.task_id,
+                        task.agent_id,
+                        task.status.value,
+                        json.dumps(task.input_data, ensure_ascii=False, default=str),
+                        json.dumps(task.context, ensure_ascii=False, default=str),
+                        task.created_at.isoformat(),
+                        task.correlation_id,
+                        task.parent_task_id,
+                        task.started_at.isoformat() if task.started_at else None,
+                        task.completed_at.isoformat() if task.completed_at else None,
+                    ),
+                )
+                self._insert_agent_event(conn, event)
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def update_agent_task_with_event(
+        self,
+        task: AgentTask,
+        result: AgentResult | None,
+        event: AgentEvent,
+    ) -> None:
+        """Atomically update an agent task and append its lifecycle event."""
+        conn = self.get_connection()
+        try:
+            output_json = json.dumps(result.output_data, ensure_ascii=False, default=str) if result else "{}"
+            error_json = result.error.model_dump_json() if result and result.error else None
+            metadata_json = (
+                json.dumps(result.execution_metadata, ensure_ascii=False, default=str) if result else "{}"
+            )
+            with conn:
+                current_row = conn.execute(
+                    "SELECT status FROM agent_tasks WHERE task_id = ?", (task.task_id,)
+                ).fetchone()
+                if current_row is None:
+                    raise KeyError(f"Unknown agent task ID: '{task.task_id}'")
+                current_status = TaskStatus(current_row["status"])
+                if task.status != current_status and task.status not in ALLOWED_TASK_TRANSITIONS[current_status]:
+                    raise ValueError(
+                        f"Invalid persisted task transition: {current_status.value} -> {task.status.value}"
+                    )
+                cursor = conn.execute(
+                    """
+                    UPDATE agent_tasks SET
+                        status = ?, started_at = ?, completed_at = ?,
+                        output_json = ?, error_json = ?, execution_metadata_json = ?
+                    WHERE task_id = ?
+                    """,
+                    (
+                        task.status.value,
+                        task.started_at.isoformat() if task.started_at else None,
+                        task.completed_at.isoformat() if task.completed_at else None,
+                        output_json,
+                        error_json,
+                        metadata_json,
+                        task.task_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(f"Unknown agent task ID: '{task.task_id}'")
+                self._insert_agent_event(conn, event)
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    @staticmethod
+    def _insert_agent_event(conn: sqlite3.Connection, event: AgentEvent) -> None:
+        conn.execute(
+            """
+            INSERT INTO agent_events (
+                event_id, task_id, agent_id, event_type, timestamp,
+                payload_json, correlation_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.task_id,
+                event.agent_id,
+                event.event_type,
+                event.timestamp.isoformat(),
+                json.dumps(event.payload, ensure_ascii=False, default=str),
+                event.correlation_id,
+            ),
+        )
+
+    def get_agent_task(self, task_id: str) -> AgentTask | None:
+        """Load one persisted task, or ``None`` when it does not exist."""
+        conn = self.get_connection()
+        try:
+            row = conn.execute("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None:
+                return None
+            return AgentTask(
+                task_id=row["task_id"],
+                agent_id=row["agent_id"],
+                status=row["status"],
+                input_data=json.loads(row["input_json"]),
+                context=json.loads(row["context_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                correlation_id=row["correlation_id"],
+                parent_task_id=row["parent_task_id"],
+                started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
+                completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+            )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def get_agent_result(self, task_id: str) -> AgentResult | None:
+        """Load a persisted terminal result, including output and error data."""
+        conn = self.get_connection()
+        try:
+            row = conn.execute("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None or row["status"] not in {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value}:
+                return None
+            return AgentResult(
+                task_id=row["task_id"],
+                agent_id=row["agent_id"],
+                status=row["status"],
+                output_data=json.loads(row["output_json"]),
+                error=AgentError.model_validate_json(row["error_json"]) if row["error_json"] else None,
+                started_at=datetime.fromisoformat(row["started_at"]),
+                completed_at=datetime.fromisoformat(row["completed_at"]),
+                execution_metadata=json.loads(row["execution_metadata_json"]),
+            )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def append_agent_event(self, event: AgentEvent) -> None:
+        """Append one agent event; FK enforcement prevents orphan events."""
+        conn = self.get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO agent_events (
+                        event_id, task_id, agent_id, event_type, timestamp,
+                        payload_json, correlation_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        event.task_id,
+                        event.agent_id,
+                        event.event_type,
+                        event.timestamp.isoformat(),
+                        json.dumps(event.payload, ensure_ascii=False, default=str),
+                        event.correlation_id,
+                    ),
+                )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def list_agent_events(self, task_id: str | None = None) -> list[AgentEvent]:
+        """Return events in insertion order, optionally scoped to a task."""
+        conn = self.get_connection()
+        try:
+            if task_id is None:
+                rows = conn.execute("SELECT * FROM agent_events ORDER BY sequence ASC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM agent_events WHERE task_id = ? ORDER BY sequence ASC", (task_id,)
+                ).fetchall()
+            return [
+                AgentEvent(
+                    event_id=row["event_id"],
+                    task_id=row["task_id"],
+                    agent_id=row["agent_id"],
+                    event_type=row["event_type"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    payload=json.loads(row["payload_json"]),
+                    correlation_id=row["correlation_id"],
+                )
+                for row in rows
+            ]
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    # --- Workflow Foundation Persistence ---
+    def save_workflow_execution(
+        self,
+        request: WorkflowExecutionRequest,
+        definition: WorkflowDefinition,
+        record: WorkflowExecutionRecord,
+        steps: list[WorkflowStepResult],
+        event: WorkflowEvent | None = None,
+    ) -> None:
+        """Create one workflow execution and its initial step records atomically."""
+        conn = self.get_connection()
+        try:
+            with conn:
+                self._insert_workflow_execution(conn, request, definition, record)
+                for step in steps:
+                    self._upsert_workflow_step(conn, record.execution_id, step, record.updated_at)
+                if event is not None:
+                    self._insert_workflow_event(conn, event)
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    @staticmethod
+    def _insert_workflow_execution(
+        conn: sqlite3.Connection,
+        request: WorkflowExecutionRequest,
+        definition: WorkflowDefinition,
+        record: WorkflowExecutionRecord,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO workflow_executions (
+                execution_id, workflow_id, workflow_version, status, input_json,
+                output_json, error_type, error_message, correlation_id,
+                parent_execution_id, current_step_id, workflow_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.execution_id,
+                record.workflow_id,
+                definition.version,
+                record.status.value,
+                json.dumps(request.input_data, ensure_ascii=False, default=str),
+                record.error_type,
+                record.error_message,
+                record.correlation_id,
+                record.parent_execution_id,
+                record.current_step_id,
+                definition.model_dump_json(),
+                record.created_at.isoformat(),
+                record.updated_at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _upsert_workflow_step(
+        conn: sqlite3.Connection,
+        execution_id: str,
+        step: WorkflowStepResult,
+        updated_at: datetime,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO workflow_steps (
+                execution_id, step_id, status, task_id, attempts, output_json,
+                error_type, error_message, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(execution_id, step_id) DO UPDATE SET
+                status = excluded.status,
+                task_id = excluded.task_id,
+                attempts = excluded.attempts,
+                output_json = excluded.output_json,
+                error_type = excluded.error_type,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at
+            """,
+            (
+                execution_id,
+                step.step_id,
+                step.status.value,
+                step.task_id,
+                step.attempts,
+                json.dumps(step.output_data, ensure_ascii=False, default=str),
+                step.error_type,
+                step.error_message,
+                updated_at.isoformat(),
+            ),
+        )
+
+    def update_workflow_execution(
+        self,
+        record: WorkflowExecutionRecord,
+        steps: list[WorkflowStepResult],
+        event: WorkflowEvent | None = None,
+    ) -> None:
+        """Atomically update workflow/step state and optionally append one event."""
+        conn = self.get_connection()
+        try:
+            with conn:
+                current_row = conn.execute(
+                    "SELECT status FROM workflow_executions WHERE execution_id = ?",
+                    (record.execution_id,),
+                ).fetchone()
+                if current_row is None:
+                    raise KeyError(f"Unknown workflow execution ID: '{record.execution_id}'")
+                current_status = WorkflowStatus(current_row["status"])
+                if (
+                    record.status != current_status
+                    and record.status not in ALLOWED_WORKFLOW_TRANSITIONS[current_status]
+                ):
+                    raise ValueError(
+                        f"Invalid persisted workflow transition: "
+                        f"{current_status.value} -> {record.status.value}"
+                    )
+                cursor = conn.execute(
+                    """
+                    UPDATE workflow_executions SET
+                        status = ?, output_json = ?, error_type = ?, error_message = ?,
+                        current_step_id = ?, updated_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (
+                        record.status.value,
+                        json.dumps(record.output_data, ensure_ascii=False, default=str),
+                        record.error_type,
+                        record.error_message,
+                        record.current_step_id,
+                        record.updated_at.isoformat(),
+                        record.execution_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(f"Unknown workflow execution ID: '{record.execution_id}'")
+                for step in steps:
+                    self._upsert_workflow_step(conn, record.execution_id, step, record.updated_at)
+                if event is not None:
+                    self._insert_workflow_event(conn, event)
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def get_workflow_execution(self, execution_id: str) -> WorkflowExecutionRecord | None:
+        conn = self.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM workflow_executions WHERE execution_id = ?", (execution_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            return WorkflowExecutionRecord(
+                execution_id=row["execution_id"],
+                workflow_id=row["workflow_id"],
+                workflow_version=row["workflow_version"],
+                status=row["status"],
+                input_data=json.loads(row["input_json"]),
+                output_data=json.loads(row["output_json"]),
+                error_type=row["error_type"],
+                error_message=row["error_message"],
+                correlation_id=row["correlation_id"],
+                parent_execution_id=row["parent_execution_id"],
+                current_step_id=row["current_step_id"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def list_workflow_steps(self, execution_id: str) -> list[WorkflowStepResult]:
+        conn = self.get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM workflow_steps WHERE execution_id = ? ORDER BY rowid ASC", (execution_id,)
+            ).fetchall()
+            return [
+                WorkflowStepResult(
+                    step_id=row["step_id"],
+                    status=row["status"],
+                    task_id=row["task_id"],
+                    attempts=row["attempts"],
+                    output_data=json.loads(row["output_json"]),
+                    error_type=row["error_type"],
+                    error_message=row["error_message"],
+                )
+                for row in rows
+            ]
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def get_workflow_definition(self, execution_id: str) -> WorkflowDefinition | None:
+        conn = self.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT workflow_json FROM workflow_executions WHERE execution_id = ?", (execution_id,)
+            ).fetchone()
+            if row is None or not row["workflow_json"] or row["workflow_json"] == "{}":
+                return None
+            return WorkflowDefinition.model_validate_json(row["workflow_json"])
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    def append_workflow_event(self, event: WorkflowEvent) -> None:
+        conn = self.get_connection()
+        try:
+            with conn:
+                self._insert_workflow_event(conn, event)
+        finally:
+            if self._conn_str != ":memory:":
+                conn.close()
+
+    @staticmethod
+    def _insert_workflow_event(conn: sqlite3.Connection, event: WorkflowEvent) -> None:
+        conn.execute(
+            """
+            INSERT INTO workflow_events (
+                event_id, execution_id, workflow_id, step_id, task_id,
+                event_type, timestamp, payload_json, correlation_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.execution_id,
+                event.workflow_id,
+                event.step_id,
+                event.task_id,
+                event.event_type,
+                event.timestamp.isoformat(),
+                json.dumps(event.payload, ensure_ascii=False, default=str),
+                event.correlation_id,
+            ),
+        )
+
+    def list_workflow_events(self, execution_id: str | None = None) -> list[WorkflowEvent]:
+        conn = self.get_connection()
+        try:
+            if execution_id is None:
+                rows = conn.execute("SELECT * FROM workflow_events ORDER BY sequence ASC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM workflow_events WHERE execution_id = ? ORDER BY sequence ASC",
+                    (execution_id,),
+                ).fetchall()
+            return [
+                WorkflowEvent(
+                    event_id=row["event_id"],
+                    execution_id=row["execution_id"],
+                    workflow_id=row["workflow_id"],
+                    step_id=row["step_id"],
+                    task_id=row["task_id"],
+                    event_type=row["event_type"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    payload=json.loads(row["payload_json"]),
+                    correlation_id=row["correlation_id"],
                 )
                 for row in rows
             ]
