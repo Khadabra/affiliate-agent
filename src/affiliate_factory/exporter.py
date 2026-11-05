@@ -128,16 +128,12 @@ def export_content_pack(
 
     claims = db.get_claims_for_draft(draft_id, prompt_version=prompt_version)
 
-    # 4. Collision check
-    if target_dir.exists():
-        if not overwrite:
-            raise ExportCollisionError(
-                f"Content pack directory '{target_dir}' already exists. "
-                f"Specify overwrite=True or --overwrite to replace it."
-            )
-
-    # 5. Atomic staging setup
+    # 4. Atomic staging setup & cleanup of stale staging directories
     base_dir.mkdir(parents=True, exist_ok=True)
+    for stale_staging in base_dir.glob(f".staging_{safe_draft_id}_*"):
+        if stale_staging.is_dir():
+            shutil.rmtree(stale_staging, ignore_errors=True)
+
     staging_dir = base_dir / f".staging_{safe_draft_id}_{uuid.uuid4().hex[:8]}"
     staging_dir.mkdir(parents=True, exist_ok=True)
     backup_dir: Path | None = None
@@ -244,6 +240,58 @@ def export_content_pack(
         }
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest_data, f, indent=2)
+
+        # 5. Collision & Idempotency check
+        if target_dir.exists():
+            if not overwrite:
+                # Idempotent export check: verify manifest metadata and core content hashes
+                is_identical = False
+                target_manifest_path = target_dir / "manifest.json"
+                if target_manifest_path.exists():
+                    try:
+                        with open(target_manifest_path, "r", encoding="utf-8") as mf:
+                            existing_manifest = json.load(mf)
+                        if (
+                            isinstance(existing_manifest, dict)
+                            and existing_manifest.get("draft_id") == draft.id
+                            and existing_manifest.get("prompt_version") == draft.prompt_version
+                            and existing_manifest.get("product_id") == product.id
+                        ):
+                            core_files = ["script.md", "caption.txt", "hashtags.txt", "product_info.json"]
+                            hashes_match = True
+                            for cf in core_files:
+                                tf = target_dir / cf
+                                sf = staging_dir / cf
+                                if not tf.exists() or compute_file_sha256(tf) != compute_file_sha256(sf):
+                                    hashes_match = False
+                                    break
+                            if hashes_match:
+                                is_identical = True
+                    except Exception:
+                        is_identical = False
+
+                if is_identical:
+                    # Clean up staging directory and return existing pack idempotently
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                    db.append_event(
+                        Event(
+                            id=str(uuid.uuid4()),
+                            ts=datetime.now(timezone.utc),
+                            run_id=effective_run_id,
+                            module="exporter",
+                            action="export_pack",
+                            status="succeeded",
+                            ref_type="draft_id",
+                            ref_id=draft.id,
+                            note=f"Exported approved content pack to {target_dir} (idempotent match)",
+                        )
+                    )
+                    return target_dir
+                else:
+                    raise ExportCollisionError(
+                        f"Content pack directory '{target_dir}' already exists with conflicting content. "
+                        f"Specify overwrite=True or --overwrite to replace it."
+                    )
 
         # 6. Atomic move to target_dir with safe backup and rollback
         if target_dir.exists() and overwrite:

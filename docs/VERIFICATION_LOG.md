@@ -629,3 +629,112 @@ Audit terhadap implementasi Phase 2.2 mengidentifikasi beberapa area integritas 
 - **Passed:** 134; **Failed:** 0; **Skipped:** 4.
 - **Skip:** empat symlink filesystem tests karena `WinError 1314`.
 - **Database produksi:** tidak digunakan atau diubah; specialist tests menggunakan SQLite temporary atau `:memory:`.
+
+
+---
+
+## 20. Phase A1 — Core Reliability: Combined Database Integrity & Workflow Reliability (2026-11-04)
+
+### Implementasi & Perubahan
+1. **Workstream 1 — Database Integrity & Concurrency Hardening:**
+   - Enforce domain-correct composite Foreign Key constraints pada `claims` dan `compliance_reports` referencing `content_drafts(id, prompt_version) ON DELETE CASCADE`.
+   - Implementasi deteksi dan preservasi orphan otomatis pada saat migrasi skema:
+     - `compliance_reports` legacy atau berstatus orphan dideteksi dan dipreservasi dengan fallback stub draft dan product di `content_drafts` sehingga nol data hilang dan foreign key valid.
+     - `claims` legacy yang tidak memiliki `prompt_version` diasosiasikan jika terdapat tepat 1 versi pada `content_drafts`. Jika 0 atau >1 versi, dibiarkan `NULL` (tidak difabrikasi). Orphan claim dengan `prompt_version` non-null dipreservasi dengan stub draft.
+     - Menyediakan method inspeksi orphan: `Database.find_orphaned_compliance_reports()` dan `Database.find_orphaned_claims()`.
+   - Penambahan index penunjang performa query:
+     - `idx_events_run_id` pada `events (run_id)`
+     - `idx_events_ref` pada `events (ref_id, module, action)`
+     - `idx_content_drafts_product` pada `content_drafts (product_id)`
+   - Konfirmasi percepatan query via `EXPLAIN QUERY PLAN` pada seluruh index baru.
+   - Penguatan concurrency SQLite: journal mode `WAL`, `PRAGMA foreign_keys = ON`, dan `PRAGMA busy_timeout = 5000` aktif pada setiap koneksi.
+
+2. **Workstream 2 — Agent & Workflow Reliability:**
+   - Audit side-effect isolation pada seluruh 7 specialist agents: batasan persistensi terisolasi, retry deterministik dengan ID unik per attempt, dan tidak ada bypass review gate.
+   - **Mandatory Export Idempotency:**
+     - `export_content_pack()` diperbarui untuk memeriksa manifest dan hash SHA-256 berkas konten inti (`script.md`, `caption.txt`, `hashtags.txt`, `product_info.json`) saat direktori target sudah ada dan `overwrite=False`.
+     - Ekspor ulang dengan konten identik tervalidasi sukses secara idempoten (membersihkan staging dan mengembalikan path tanpa error).
+     - Ekspor dengan konten yang bertentangan atau berbeda memicu `ExportCollisionError` secara fail-closed.
+     - Pembersihan direktori `.staging_*` yang terinterupsi secara otomatis.
+
+### Hasil Pengujian Targeted Phase A1
+- **Perintah harness:** `$env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest -v tests/test_phase_a1_database.py`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 10 tests in 0.814s`; `OK`.
+- **Cakupan Pengujian:**
+  1. `test_fk_valid_draft_reference_succeeds`: Valid reference ke `content_drafts(id, prompt_version)` berhasil disimpan (`PASS`).
+  2. `test_fk_invalid_compliance_report_reference_rejected`: Reference compliance report ke draft yang tidak ada ditolak tegas oleh SQLite (`IntegrityError: FOREIGN KEY constraint failed`) (`PASS`).
+  3. `test_fk_invalid_claim_reference_rejected`: Reference claim dengan explicit prompt_version ke draft yang tidak ada ditolak tegas (`IntegrityError: FOREIGN KEY constraint failed`) (`PASS`).
+  4. `test_fk_cascade_deletion_on_draft_delete`: Menghapus draf induk otomatis menghapus report dan claim anak secara kaskade via `ON DELETE CASCADE` (`PASS`).
+  5. `test_migration_idempotency`: Pemanggilan `init_schema()` berulang-ulang bersifat idempoten tanpa duplikasi data atau modifikasi skema yang merusak (`PASS`).
+  6. `test_orphan_compliance_report_preservation_during_migration`: Report orphan legacy berhasil dipreservasi dengan stub draft dan product fallback, 0 pelanggaran FK (`PASS`).
+  7. `test_orphan_inspection_helper_methods`: Helper `find_orphaned_compliance_reports` dan `find_orphaned_claims` mendeteksi anomali orphan dengan akurat (`PASS`).
+  8. `test_query_plan_indexes_verified`: Percepatan query terbukti via `EXPLAIN QUERY PLAN` menggunakan `idx_events_run_id`, `idx_events_ref`, dan `idx_content_drafts_product` (`PASS`).
+  9. `test_wal_mode_and_pragmas`: Verifikasi journal mode `wal`, busy timeout 5000 ms, dan foreign key active (`PASS`).
+  10. `test_concurrent_read_write_under_wal`: 4 writer thread dan 4 reader thread berjalan simultan tanpa error kunci database (`PASS`).
+
+### Full Test Suite
+- **Perintah harness:** `$env:PYTHONPATH="src;."; & ".\.venv\Scripts\python.exe" -m unittest discover -s tests -p 'test_*.py' -v`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 161 tests in 8.788s`; `OK (skipped=4)`.
+- **Passed:** 157; **Failed:** 0; **Skipped:** 4.
+- **Skip:** 4 test symlink filesystem existing tetap `WinError 1314` (privilege lingkungan Windows); tidak diganti mock.
+- **Database produksi:** tidak digunakan atau diubah; seluruh pengujian memakai SQLite temporary dan `:memory:`.
+
+---
+
+## 21. Phase A2.1 & A2.1.1 — Core Data Layer & Corrective Patch (2026-11-05)
+
+### Implementasi & Perbaikan (A2.1 & A2.1.1)
+1. **TransactionScope & Connection Ownership (`src/affiliate_factory/db.py`):**
+   - Transaksi terkelola (`self._owned = True`) menggunakan `BEGIN IMMEDIATE`, melakukan `commit()`, dan jika `commit()` gagal, menjalankan `rollback()` tanpa menutupi exception asli.
+   - Koneksi caller-owned (`conn` disediakan oleh pemanggil) diverifikasi harus memiliki transaksi aktif (`conn.in_transaction == True`). TransactionScope TIDAK commit, TIDAK rollback, dan TIDAK menutup koneksi caller.
+   - Dukungan koneksi `:memory:` ter-cache: saat commit gagal, status transaksi di-reset sehingga koneksi tetap dapat digunakan untuk transaksi berikutnya.
+2. **Persistent Job Queue & Lease Fencing (`jobs`, `job_runs`, `approval_records`):**
+   - Skema tabel `jobs`, `job_runs`, dan `approval_records` dengan foreign keys dan index penunjang `idx_jobs_status_priority_created` dan `idx_jobs_lease_expires`.
+   - Lifecycle job: `submit_job`, `claim_next_job`, `heartbeat_job`, `complete_job`, `fail_job`.
+   - Fencing ketat: `heartbeat_job`, `complete_job`, dan `fail_job` memvalidasi kelima predikat:
+     `job_id = ? AND worker_id = ? AND lease_token = ? AND status = 'running' AND lease_expires_at > ?`.
+     Worker lambat / zombie dengan lease kedaluwarsa ditolak tegas dan tidak dapat memodifikasi status job atau job_runs.
+3. **Database Migration Integrity & Foreign Key Check:**
+   - `Database.init_schema()` menjalankan `PRAGMA foreign_key_check` setelah migrasi dan pembuatan tabel.
+   - Jika ditemukan pelanggaran foreign key, proses dibatalkan dengan `RuntimeError` deskriptif yang mencantumkan tabel dan rowid pelanggar.
+4. **Safe Database Backup (`create_safe_database_backup`):**
+   - Backup online via SQLite `backup` API aman pada mode WAL tanpa mengunci pembaca/penulis.
+   - Validasi `PRAGMA integrity_check == 'ok'` pada berkas staging sebelum rename/swap atomik ke target.
+   - Kegagalan backup membersihkan berkas sementara tanpa merusak berkas backup valid yang sudah ada.
+
+### Hasil Pengujian Targeted Phase A2.1 / A2.1.1
+- **Perintah targeted:** `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe -m unittest tests.test_phase_a2_db_transactions`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 28 tests in 2.133s`; `OK`.
+- **Cakupan Pengujian:**
+  1. `TestTransactionScope` (10 tes):
+     - Self-managed transaction commit & rollback on exception (`PASS`).
+     - Nested self-managed transaction blocks commit atomically on outermost scope (`PASS`).
+     - Caller-owned transaction preservation: caller commits, caller rolls back, inner exception does not abort caller transaction (`PASS`).
+     - Rejection when caller connection is not in transaction (`PASS`).
+     - `:memory:` commit failure recovery and reuse (`PASS`).
+  2. `TestPersistentJobQueue` (14 tes):
+     - Job submission (queued status, payload, priority) & idempotency key deduplication (`PASS`).
+     - Claiming priority order & FIFO tie-breaking (`PASS`).
+     - Supported job types filtering (`PASS`).
+     - Lease duration, worker assignment, and job_run attempt tracking (`PASS`).
+     - Heartbeat extension, invalid worker/token rejection, and expired lease rejection (`PASS`).
+     - Completion recording result_payload and lease expiry fencing (`PASS`).
+     - Fail job recording error_message and lease expiry fencing (`PASS`).
+     - Stale worker rejection after reclaim by second worker (`PASS`).
+     - Cancellation requested flag preservation (`PASS`).
+  3. `TestWindowsMultiprocessingConcurrency` (1 tes):
+     - Dua proses Windows terpisah (`multiprocessing.Process` spawn mode) bersaing mengklaim 1 job: tepat 1 pemenang dan 1 pecundang tanpa double-claim (`PASS`).
+  4. `TestSafeDatabaseBackup` (3 tes):
+     - Safe online backup pada active WAL mode dengan `PRAGMA integrity_check` lulus (`PASS`).
+     - Module-level backup helper (`PASS`).
+     - Backup failure tidak merusak backup valid yang sudah ada dan membersihkan staging temp files (`PASS`).
+
+### Full Test Suite Regression
+- **Perintah harness:** `$env:PYTHONPATH="src"; .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"`
+- **Exit Code:** `0`
+- **Hasil:** `Ran 189 tests in 11.806s`; `OK (skipped=4)`.
+- **Passed:** 185; **Failed:** 0; **Skipped:** 4 (symlink filesystem tests skip karena `WinError 1314` privilege Windows).
+- **Integritas Git:** HEAD tetap `6cdf8fa48394a93b374586675beb7bcfaff2186e`. Tidak ada commit, push, atau staging.

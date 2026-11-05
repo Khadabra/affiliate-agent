@@ -11,6 +11,8 @@ secrets/
 tmp/
 __pycache__/
 *.pyc
+web/node_modules/
+web/dist/
 
 # Media outputs
 output/
@@ -21,6 +23,10 @@ output/
 # SQLite databases
 *.sqlite3
 *.db
+*.db-wal
+*.db-shm
 data/*.sqlite3
 data/*.db
+data/*.db-wal
+data/*.db-shm
 

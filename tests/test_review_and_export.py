@@ -410,13 +410,24 @@ class TestReviewAndExport(unittest.TestCase):
         packs_dir = Path(self.temp_dir.name) / "output" / "packs"
 
         # First export succeeds
-        export_content_pack(
+        pack_path = export_content_pack(
             self.db,
             self.sample_draft.id,
             base_output_dir=packs_dir,
         )
+        self.assertTrue(pack_path.exists())
 
-        # Second export without overwrite raises ExportCollisionError
+        # Second export of identical content without overwrite succeeds idempotently
+        idempotent_pack = export_content_pack(
+            self.db,
+            self.sample_draft.id,
+            base_output_dir=packs_dir,
+            overwrite=False,
+        )
+        self.assertEqual(idempotent_pack, pack_path)
+
+        # Conflicting export without overwrite raises ExportCollisionError
+        (pack_path / "script.md").write_text("Conflicting script content", encoding="utf-8")
         with self.assertRaises(ExportCollisionError) as ctx:
             export_content_pack(
                 self.db,
@@ -424,9 +435,9 @@ class TestReviewAndExport(unittest.TestCase):
                 base_output_dir=packs_dir,
                 overwrite=False,
             )
-        self.assertIn("already exists", str(ctx.exception))
+        self.assertIn("already exists with conflicting content", str(ctx.exception))
 
-        # Third export with overwrite succeeds
+        # Third export with overwrite succeeds and overwrites conflicting content
         re_exported = export_content_pack(
             self.db,
             self.sample_draft.id,
@@ -509,6 +520,19 @@ class TestReviewAndExport(unittest.TestCase):
         self.assertTrue(report_v1.passed)
 
         # Verify that inserting a v2.0 report for the same draft_id works without overwriting v1.0
+        migrated_db.upsert_draft(
+            ContentDraft(
+                id="draft_legacy_01",
+                product_id="orphan_recovery_fallback_prod",
+                angle="Angle",
+                hook="Hook",
+                script="Script",
+                caption="Caption",
+                cta="CTA",
+                disclosure_text="#AI",
+                prompt_version="v2.0",
+            )
+        )
         report_v2 = ComplianceReport(
             draft_id="draft_legacy_01",
             prompt_version="v2.0",

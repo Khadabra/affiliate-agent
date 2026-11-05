@@ -8,7 +8,23 @@ Dokumen ini memuat status kerja terkini proyek **AI Affiliate Content Factory** 
 Membangun sistem semi-otomatis modular untuk memproduksi, mengaudit kepatuhan, dan melacak konversi konten afiliasi Shopee Indonesia berbasis Python deterministik, penyimpanan lokal SQLite, dan persetujuan manusia.
 
 ## 2. Fase Saat Ini
-**Phase 3.3 Selesai Implementasi & Verifikasi** — Specialist agents deterministic/manual-first telah dibangun di atas fondasi Phase 3.1–3.2:
+**Phase A2.1 & A2.1.1 Selesai Implementasi & Verifikasi** - Core Data Layer, Persistent Job Queue, TransactionScope, Lease Fencing, dan SQLite Reliability:
+1. **Transaction Ownership:** TransactionScope mengelola transaksi self-managed dengan BEGIN IMMEDIATE, atomisitas commit/rollback, dan proteksi koneksi caller-owned (tidak commit/rollback/close sembarangan). Dukungan koneksi :memory: ter-cache pulih bersih setelah commit failure.
+2. **Persistent Job Queue & Concurrency:** Tabel jobs, job_runs, dan approval_records diatur dengan index dan constraints. Klaim job terproteksi terhadap balapan multi-proses (terverifikasi 1 pemenang dari 2 proses Windows spawn).
+3. **Lease Fencing Ketat:** heartbeat_job, complete_job, dan fail_job memvalidasi kelima kondisi (job_id, worker_id, lease_token, status == 'running', lease_expires_at > now). Worker kadaluwarsa/zombie tidak dapat memodifikasi status job.
+4. **Foreign Key Migration Check:** Database.init_schema() memvalidasi PRAGMA foreign_key_check dan me-raise RuntimeError deskriptif jika ada pelanggaran integritas referensial.
+5. **Safe Database Backup:** create_safe_database_backup menggunakan SQLite online backup API yang aman pada mode WAL, memvalidasi PRAGMA integrity_check == 'ok' pada staging sebelum swap atomik, dan membersihkan sisa kegagalan tanpa merusak backup sebelumnya.
+6. **Hasil Pengujian:** 28 test targeted Phase A2.1/A2.1.1 lulus; full regression suite 189 test selesai dengan 185 passed, 4 skipped (Windows symlink privilege WinError 1314), 0 failed.
+
+Phase A1 sebelumnya telah menyelesaikan Core Reliability:
+1. **Foreign Keys:** Domain-correct composite foreign keys `FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE` ditegakkan pada `claims` dan `compliance_reports`.
+2. **Orphan Preservation:** Deteksi dan preservasi orphan otomatis pada saat migrasi tanpa kehilangan data (zero data loss); helper method `find_orphaned_claims()` dan `find_orphaned_compliance_reports()` tersedia.
+3. **Query Acceleration:** Index `idx_events_run_id`, `idx_events_ref`, dan `idx_content_drafts_product` mempercepat query audit dan lookup (terverifikasi via `EXPLAIN QUERY PLAN`).
+4. **Concurrency:** `PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`, dan `PRAGMA busy_timeout = 5000` aktif pada setiap koneksi; concurrent multithreaded readers/writers teruji tanpa error kunci.
+5. **Export Idempotency:** Ekspor berulang dengan konten identik tervalidasi sukses idempoten; konten bertentangan ditolak fail-closed dengan `ExportCollisionError`; pembersihan direktori `.staging_*` terinterupsi dilakukan otomatis.
+6. **Hasil:** 10 test Phase A1 baru, 161 test full suite dieksekusi (157 passed, 4 skipped symlink karena privilege Windows `WinError 1314`, 0 failed).
+
+Phase 3.3 sebelumnya telah menyelesaikan Specialist Agents:
 1. **Specialists:** Research, Content Writer, Fact Checker, Compliance, Human Approval Gate, Export, dan Analytics tersedia sebagai `BaseAgent` terdaftar.
 2. **Default workflow:** Research → Content Writer → Fact Checker → Compliance → Human Approval → Export; Analytics tetap terpisah.
 3. **Evidence safety:** Research mempertahankan provenance; Writer hanya memakai fakta supported; Fact Checker tidak menandai klaim sebagai verified otomatis; Compliance menggunakan engine fail-closed existing.
@@ -61,6 +77,7 @@ Seluruh 105 unit test selesai dengan exit code 0; 4 test symlink filesystem di-s
 - `Phase 3.1 (Agent Foundation)`: Kontrak Pydantic, base agent, registry, execution context, provider abstraction, sequential agent orchestrator, lifecycle events, dan persistence SQLite aditif (120 test, 4 skip symlink karena privilege Windows).
 - `Phase 3.2 (Workflow Orchestrator)`: Workflow definitions, dependency-aware sequential executor, mappings, retry/recovery, human approval pause/resume, workflow events, dan persistence transaksi SQLite (129 test, 4 skip symlink karena privilege Windows).
 - `Phase 3.3 (Specialist Agents)`: Research, Content Writer, Fact Checker, Compliance, Human Approval Gate, Export, Analytics, default content workflow, in-memory recovery hardening, dan pre-flight symlink verification (138 test, 4 skip symlink karena privilege Windows).
+- `Phase A1 (Core Reliability)`: Composite foreign keys claims/compliance_reports ON DELETE CASCADE, orphan preservation migration, index events/content_drafts, query plan verification, WAL concurrency, export idempotency, dan 10 test database integrity (161 unit tests, 4 skip symlink karena privilege Windows).
 
 ## 4. Keputusan Terkunci
 1. **Runtime:** Python 3.12 pada `.venv` lokal menggunakan `uv`.
@@ -80,7 +97,7 @@ Seluruh 105 unit test selesai dengan exit code 0; 4 test symlink filesystem di-s
 3. Korelasi antara angle naskah promosi dan tingkat konversi masih membutuhkan data empiris yang lebih besar untuk menghasilkan kesimpulan statistik valid.
 
 ## 6. Tugas Berikutnya (Hanya Satu)
-> **Phase 3.4: evaluasi kontrak specialist-agent terhadap kebutuhan Dashboard/Agent Office read model tanpa menambahkan UI atau API eksternal.**
+> **Phase A2.2: Implementasi Background Worker Daemon, Claim Loop, dan Execution Lifecycle.**
 
 ## 7. Larangan Keras
 - Dilarang scraping antarmuka web Shopee atau membypass mekanisme proteksi bot.

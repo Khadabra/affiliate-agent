@@ -44,6 +44,8 @@ class TestPhase222Security(unittest.TestCase):
 
     def _assert_config_failure(self, config_path: Path) -> None:
         db = Database(":memory:")
+        db.insert_product(self.product)
+        db.upsert_draft(self.draft)
         report = check_compliance(
             db=db,
             draft=self.draft,

@@ -288,6 +288,20 @@ class TestPhase11Isolation(unittest.TestCase):
 
     def test_expected_prompt_version_mismatch_raises_error(self) -> None:
         """Reviewing a claim with an mismatched expected prompt version raises ReviewError."""
+        self.db.upsert_draft(
+            ContentDraft(
+                id="draft_ver_test",
+                product_id=self.product.id,
+                angle="Problem-Benefit",
+                hook="Test hook",
+                script="Test script",
+                caption="Test caption #ShopeeAffiliate #KontenAI",
+                cta="Test CTA",
+                disclosure_text="#ShopeeAffiliate #KontenAI",
+                status="waiting_approval",
+                prompt_version="v2.0",
+            )
+        )
         claim = Claim(
             id="claim_ver_mismatch",
             draft_id="draft_ver_test",

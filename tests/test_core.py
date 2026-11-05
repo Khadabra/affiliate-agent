@@ -55,6 +55,8 @@ class TestAffiliateFactoryCore(unittest.TestCase):
             prompt_version="manual",
         )
 
+        self.db.insert_product(self.sample_product)
+        self.db.upsert_draft(draft)
         report = check_compliance(
             db=self.db,
             draft=draft,
@@ -81,6 +83,8 @@ class TestAffiliateFactoryCore(unittest.TestCase):
             prompt_version="manual",
         )
 
+        self.db.insert_product(self.sample_product)
+        self.db.upsert_draft(draft)
         report = check_compliance(
             db=self.db,
             draft=draft,
@@ -108,6 +112,8 @@ class TestAffiliateFactoryCore(unittest.TestCase):
             prompt_version="v1.0",
         )
 
+        self.db.insert_product(self.sample_product)
+        self.db.upsert_draft(draft)
         report = check_compliance(
             db=self.db,
             draft=draft,
