@@ -95,7 +95,7 @@ class JobRunRecord(BaseModel):
     error_message: str | None = None
 
 
-CURRENT_SCHEMA_VERSION: int = 2
+CURRENT_SCHEMA_VERSION: int = 3
 
 
 class ApprovalDecision(StrEnum):
@@ -121,7 +121,7 @@ class ApprovalRecord(BaseModel):
     @field_validator("decision")
     @classmethod
     def validate_decision(cls, v: str) -> str:
-        upper = v.upper()
+        upper = v.upper().strip()
         if upper == "APPROVED":
             upper = "APPROVE"
         elif upper == "REJECTED":
@@ -130,67 +130,139 @@ class ApprovalRecord(BaseModel):
             raise ValueError(f"Invalid approval decision '{v}'. Decision must be 'APPROVE' or 'REJECT'.")
         return upper
 
+    @field_validator("content_sha256")
+    @classmethod
+    def validate_content_sha256(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v_clean = v.strip().lower()
+        if len(v_clean) != 64 or not all(c in "0123456789abcdef" for c in v_clean):
+            raise ValueError(
+                f"Invalid content_sha256 '{v}': must be exactly 64 lowercase hexadecimal characters."
+            )
+        return v_clean
+
+    @field_validator("claims_fingerprint")
+    @classmethod
+    def validate_claims_fingerprint(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v_clean = v.strip().lower()
+        if len(v_clean) != 64 or not all(c in "0123456789abcdef" for c in v_clean):
+            raise ValueError(
+                f"Invalid claims_fingerprint '{v}': must be exactly 64 lowercase hexadecimal characters."
+            )
+        return v_clean
+
+    @field_validator("job_attempt")
+    @classmethod
+    def validate_job_attempt(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v < 1:
+            raise ValueError(f"Invalid job_attempt '{v}': must be an integer >= 1.")
+        return v
+
     @property
     def has_complete_binding(self) -> bool:
         """Return True only if all 5 binding fields are present and valid."""
         return (
             bool(self.draft_id and str(self.draft_id).strip())
             and bool(self.prompt_version and str(self.prompt_version).strip())
-            and bool(self.claims_fingerprint and str(self.claims_fingerprint).strip())
-            and bool(self.content_sha256 and str(self.content_sha256).strip())
-            and (self.job_attempt is not None and self.job_attempt >= 1)
+            and bool(self.claims_fingerprint and len(self.claims_fingerprint) == 64 and all(c in "0123456789abcdef" for c in self.claims_fingerprint))
+            and bool(self.content_sha256 and len(self.content_sha256) == 64 and all(c in "0123456789abcdef" for c in self.content_sha256))
+            and bool(self.job_attempt is not None and self.job_attempt >= 1)
         )
 
     def is_valid_for_export(
         self,
-        draft_id: str | None = None,
-        prompt_version: str | None = None,
+        draft_id: str,
+        prompt_version: str,
         content_sha256: str | None = None,
         claims_fingerprint: str | None = None,
     ) -> bool:
         """Check if this approval is authoritative and strictly bound to the requested content.
 
-        Legacy unbound approvals or approvals missing any binding data always return False.
+        Fail-closed: returns False if decision != 'APPROVE', if binding is incomplete or legacy,
+        or if any required field is None/empty or does not match.
         """
         if self.decision != ApprovalDecision.APPROVE:
             return False
         if not self.has_complete_binding:
             return False
-        if draft_id is not None and self.draft_id != draft_id:
+        if not draft_id or self.draft_id != draft_id:
             return False
-        if prompt_version is not None and self.prompt_version != prompt_version:
+        if not prompt_version or self.prompt_version != prompt_version:
             return False
-        if content_sha256 is not None and self.content_sha256 != content_sha256:
-            return False
-        if claims_fingerprint is not None and self.claims_fingerprint != claims_fingerprint:
-            return False
+        if content_sha256 is not None:
+            if self.content_sha256 != content_sha256.strip().lower():
+                return False
+        if claims_fingerprint is not None:
+            if self.claims_fingerprint != claims_fingerprint.strip().lower():
+                return False
         return True
 
 
-def compute_content_sha256(content: str | bytes | ContentDraft) -> str:
-    """Compute deterministic SHA-256 hex digest for content or ContentDraft."""
+def compute_content_sha256(content: str | bytes | bytearray | ContentDraft) -> str:
+    """Compute canonical deterministic SHA-256 hex digest for content or ContentDraft.
+
+    Uses canonical JSON (sorted keys, compact separators, UTF-8 encoded)
+    to eliminate delimiter collision across distinct field combinations.
+    """
     if isinstance(content, ContentDraft):
-        raw = f"{content.hook}\n{content.script}\n{content.caption}\n{content.cta}\n{content.disclosure_text}".encode("utf-8")
+        payload = {
+            "angle": content.angle,
+            "caption": content.caption,
+            "cta": content.cta,
+            "disclosure_text": content.disclosure_text,
+            "hook": content.hook,
+            "id": content.id,
+            "product_id": content.product_id,
+            "prompt_version": content.prompt_version,
+            "script": content.script,
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     elif isinstance(content, str):
         raw = content.encode("utf-8")
+    elif isinstance(content, (bytes, bytearray)):
+        raw = bytes(content)
     else:
-        raw = content
-    return hashlib.sha256(raw).hexdigest()
+        raise TypeError(f"Unsupported content type for SHA-256 computation: {type(content)}")
+    return hashlib.sha256(raw).hexdigest().lower()
 
 
 def compute_claims_fingerprint(claims: list[Claim] | list[dict[str, Any]] | list[str]) -> str:
-    """Compute deterministic SHA-256 fingerprint for a list of claims."""
-    serialized: list[str] = []
+    """Compute canonical deterministic SHA-256 fingerprint for a list of claims.
+
+    Extracts canonical claim representations, sorts them deterministically,
+    and produces canonical JSON with UTF-8 encoding.
+    """
+    canonical_items: list[dict[str, Any]] = []
     for c in claims:
         if isinstance(c, Claim):
-            serialized.append(f"{c.id}:{c.text}:{c.verification_status}:{c.source_ref or ''}")
+            canonical_items.append({
+                "id": str(c.id),
+                "source_ref": str(c.source_ref) if c.source_ref is not None else None,
+                "text": str(c.text),
+                "verification_status": str(c.verification_status),
+            })
         elif isinstance(c, dict):
-            serialized.append(f"{c.get('id', '')}:{c.get('text', '')}:{c.get('verification_status', '')}:{c.get('source_ref') or ''}")
+            canonical_items.append({
+                "id": str(c.get("id", "")),
+                "source_ref": str(c["source_ref"]) if c.get("source_ref") is not None else None,
+                "text": str(c.get("text", "")),
+                "verification_status": str(c.get("verification_status", "")),
+            })
         else:
-            serialized.append(str(c))
-    serialized.sort()
-    raw = "\n".join(serialized).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+            canonical_items.append({
+                "id": "",
+                "source_ref": None,
+                "text": str(c),
+                "verification_status": "",
+            })
+    canonical_items.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    payload = json.dumps(canonical_items, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest().lower()
 
 
 class TransactionScope:
@@ -354,8 +426,11 @@ class Database:
                 backup_name = f"{self.db_path.stem}_pre_migration_v{current_version}_{ts}.db"
                 try:
                     self.create_safe_database_backup(backup_dir, backup_name=backup_name)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Pre-migration backup failed for existing database '{self.db_path}': {exc}. "
+                        "Migration aborted to prevent data loss."
+                    ) from exc
 
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -607,71 +682,175 @@ class Database:
                             "ALTER TABLE workflow_executions ADD COLUMN workflow_json TEXT NOT NULL DEFAULT '{}'"
                         )
 
-                # 5. approval_records migration
+                # 5. Quarantine table & approval_records migration
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS approval_records_quarantine (
+                        quarantine_id TEXT PRIMARY KEY,
+                        approval_id TEXT NOT NULL,
+                        job_id TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        reviewer TEXT NOT NULL,
+                        notes TEXT,
+                        reviewed_at TEXT NOT NULL,
+                        draft_id TEXT,
+                        prompt_version TEXT,
+                        claims_fingerprint TEXT,
+                        content_sha256 TEXT,
+                        job_attempt INTEGER,
+                        quarantine_reason TEXT NOT NULL,
+                        quarantined_at TEXT NOT NULL,
+                        raw_payload_json TEXT NOT NULL DEFAULT '{}'
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_approval_quarantine_job ON approval_records_quarantine (job_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_approval_quarantine_reason ON approval_records_quarantine (quarantine_reason)"
+                )
+
                 table_check_approvals = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='approval_records'"
                 ).fetchone()
-                if table_check_approvals:
-                    appr_cols = {
-                        row["name"]
-                        for row in conn.execute("PRAGMA table_info(approval_records)").fetchall()
-                    }
-                    if "draft_id" not in appr_cols:
-                        conn.execute(
-                            """
-                            CREATE TABLE approval_records_v2 (
-                                approval_id TEXT PRIMARY KEY,
-                                job_id TEXT NOT NULL,
-                                decision TEXT NOT NULL CHECK (decision IN ('APPROVE', 'REJECT')),
-                                reviewer TEXT NOT NULL,
-                                notes TEXT,
-                                reviewed_at TEXT NOT NULL,
-                                draft_id TEXT,
-                                prompt_version TEXT,
-                                claims_fingerprint TEXT,
-                                content_sha256 TEXT,
-                                job_attempt INTEGER,
-                                FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE,
-                                FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
+                if table_check_approvals and current_version < CURRENT_SCHEMA_VERSION:
+                    existing_rows = conn.execute("SELECT * FROM approval_records").fetchall()
+                    job_rows: dict[str, list[sqlite3.Row]] = {}
+                    for r in existing_rows:
+                        job_rows.setdefault(r["job_id"], []).append(r)
+
+                    clean_rows: list[tuple] = []
+                    for j_id, r_list in job_rows.items():
+                        appr_rows = [
+                            r for r in r_list
+                            if str(r["decision"]).strip().upper() in ("APPROVE", "APPROVED")
+                        ]
+                        has_duplicate_approves = len(appr_rows) > 1
+
+                        for r in r_list:
+                            r_keys = r.keys() if hasattr(r, "keys") else []
+                            raw_dec = str(r["decision"]).strip()
+                            upper_dec = raw_dec.upper()
+                            d_id = r["draft_id"] if "draft_id" in r_keys else None
+                            p_ver = r["prompt_version"] if "prompt_version" in r_keys else None
+                            c_fp = r["claims_fingerprint"] if "claims_fingerprint" in r_keys else None
+                            c_sha = r["content_sha256"] if "content_sha256" in r_keys else None
+                            j_att = r["job_attempt"] if "job_attempt" in r_keys else None
+
+                            quarantine_reason: str | None = None
+                            if upper_dec not in ("APPROVE", "APPROVED", "REJECT", "REJECTED"):
+                                quarantine_reason = f"invalid_legacy_decision: {raw_dec}"
+                            elif upper_dec in ("APPROVE", "APPROVED") and has_duplicate_approves:
+                                quarantine_reason = f"duplicate_legacy_approval: job '{j_id}' has multiple conflicting approvals"
+                            else:
+                                is_unbound = (d_id is None and p_ver is None and c_fp is None and c_sha is None and j_att is None)
+                                is_bound = bool(
+                                    d_id and str(d_id).strip()
+                                    and p_ver and str(p_ver).strip()
+                                    and c_sha and len(str(c_sha).strip()) == 64 and all(c in "0123456789abcdef" for c in str(c_sha).strip().lower())
+                                    and c_fp and len(str(c_fp).strip()) == 64 and all(c in "0123456789abcdef" for c in str(c_fp).strip().lower())
+                                    and (j_att is not None and j_att >= 1)
+                                )
+                                if not is_unbound and not is_bound:
+                                    quarantine_reason = "incomplete_or_invalid_binding"
+
+                            if quarantine_reason is not None:
+                                raw_json = json.dumps({k: r[k] for k in r_keys})
+                                q_id = f"quarantine_{uuid.uuid4().hex}"
+                                q_now = datetime.now(timezone.utc).isoformat()
+                                conn.execute(
+                                    """
+                                    INSERT INTO approval_records_quarantine (
+                                        quarantine_id, approval_id, job_id, decision, reviewer, notes,
+                                        reviewed_at, draft_id, prompt_version, claims_fingerprint,
+                                        content_sha256, job_attempt, quarantine_reason, quarantined_at,
+                                        raw_payload_json
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        q_id, r["approval_id"], r["job_id"], raw_dec, r["reviewer"],
+                                        r["notes"], r["reviewed_at"], d_id, p_ver, c_fp, c_sha, j_att,
+                                        quarantine_reason, q_now, raw_json
+                                    ),
+                                )
+                            else:
+                                norm_dec = "APPROVE" if upper_dec in ("APPROVE", "APPROVED") else "REJECT"
+                                clean_rows.append((
+                                    r["approval_id"], r["job_id"], norm_dec, r["reviewer"],
+                                    r["notes"], r["reviewed_at"], d_id, p_ver, c_fp, c_sha, j_att
+                                ))
+
+                    conn.execute(
+                        """
+                        CREATE TABLE approval_records_v2 (
+                            approval_id TEXT PRIMARY KEY,
+                            job_id TEXT NOT NULL,
+                            decision TEXT NOT NULL CHECK (decision IN ('APPROVE', 'REJECT')),
+                            reviewer TEXT NOT NULL,
+                            notes TEXT,
+                            reviewed_at TEXT NOT NULL,
+                            draft_id TEXT,
+                            prompt_version TEXT,
+                            claims_fingerprint TEXT,
+                            content_sha256 TEXT,
+                            job_attempt INTEGER,
+                            FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE,
+                            FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE,
+                            CHECK (
+                                content_sha256 IS NULL OR (
+                                    length(content_sha256) = 64 AND
+                                    content_sha256 NOT GLOB '*[^0-9a-f]*'
+                                )
+                            ),
+                            CHECK (
+                                claims_fingerprint IS NULL OR (
+                                    length(claims_fingerprint) = 64 AND
+                                    claims_fingerprint NOT GLOB '*[^0-9a-f]*'
+                                )
+                            ),
+                            CHECK (
+                                job_attempt IS NULL OR job_attempt >= 1
+                            ),
+                            CHECK (
+                                (draft_id IS NULL AND prompt_version IS NULL AND claims_fingerprint IS NULL AND content_sha256 IS NULL AND job_attempt IS NULL)
+                                OR
+                                (
+                                    draft_id IS NOT NULL AND length(trim(draft_id)) > 0 AND
+                                    prompt_version IS NOT NULL AND length(trim(prompt_version)) > 0 AND
+                                    claims_fingerprint IS NOT NULL AND
+                                    content_sha256 IS NOT NULL AND
+                                    job_attempt IS NOT NULL AND job_attempt >= 1
+                                )
                             )
-                            """
                         )
+                        """
+                    )
+                    for cr in clean_rows:
                         conn.execute(
                             """
                             INSERT INTO approval_records_v2 (
                                 approval_id, job_id, decision, reviewer, notes, reviewed_at,
                                 draft_id, prompt_version, claims_fingerprint, content_sha256, job_attempt
-                            )
-                            SELECT
-                                approval_id,
-                                job_id,
-                                CASE
-                                    WHEN UPPER(decision) = 'APPROVED' THEN 'APPROVE'
-                                    WHEN UPPER(decision) = 'REJECTED' THEN 'REJECT'
-                                    ELSE UPPER(decision)
-                                END,
-                                reviewer,
-                                notes,
-                                reviewed_at,
-                                NULL, NULL, NULL, NULL, NULL
-                            FROM approval_records
-                            """
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            cr,
                         )
-                        conn.execute("DROP TABLE approval_records")
-                        conn.execute("ALTER TABLE approval_records_v2 RENAME TO approval_records")
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_approval_records_job ON approval_records (job_id)"
-                        )
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_approval_records_draft ON approval_records (draft_id, prompt_version)"
-                        )
-                        conn.execute(
-                            """
-                            CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_records_authoritative_unique
-                                ON approval_records (job_id)
-                                WHERE decision = 'APPROVE'
-                            """
-                        )
+                    conn.execute("DROP TABLE approval_records")
+                    conn.execute("ALTER TABLE approval_records_v2 RENAME TO approval_records")
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_approval_records_job ON approval_records (job_id)"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_approval_records_draft ON approval_records (draft_id, prompt_version)"
+                    )
+                    conn.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_records_authoritative_unique
+                            ON approval_records (job_id)
+                            WHERE decision = 'APPROVE'
+                        """
+                    )
 
                 # 6. Ensure all required tables and indexes exist
                 conn.execute(
@@ -928,7 +1107,33 @@ class Database:
                         content_sha256 TEXT,
                         job_attempt INTEGER,
                         FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE,
-                        FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
+                        FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE,
+                        CHECK (
+                            content_sha256 IS NULL OR (
+                                length(content_sha256) = 64 AND
+                                content_sha256 NOT GLOB '*[^0-9a-f]*'
+                            )
+                        ),
+                        CHECK (
+                            claims_fingerprint IS NULL OR (
+                                length(claims_fingerprint) = 64 AND
+                                claims_fingerprint NOT GLOB '*[^0-9a-f]*'
+                            )
+                        ),
+                        CHECK (
+                            job_attempt IS NULL OR job_attempt >= 1
+                        ),
+                        CHECK (
+                            (draft_id IS NULL AND prompt_version IS NULL AND claims_fingerprint IS NULL AND content_sha256 IS NULL AND job_attempt IS NULL)
+                            OR
+                            (
+                                draft_id IS NOT NULL AND length(trim(draft_id)) > 0 AND
+                                prompt_version IS NOT NULL AND length(trim(prompt_version)) > 0 AND
+                                claims_fingerprint IS NOT NULL AND
+                                content_sha256 IS NOT NULL AND
+                                job_attempt IS NOT NULL AND job_attempt >= 1
+                            )
+                        )
                     )
                     """
                 )
@@ -2709,12 +2914,12 @@ class Database:
                 missing.append("draft_id")
             if not (approval.prompt_version and str(approval.prompt_version).strip()):
                 missing.append("prompt_version")
-            if not (approval.claims_fingerprint and str(approval.claims_fingerprint).strip()):
-                missing.append("claims_fingerprint")
-            if not (approval.content_sha256 and str(approval.content_sha256).strip()):
-                missing.append("content_sha256")
+            if not (approval.claims_fingerprint and len(approval.claims_fingerprint) == 64 and all(c in "0123456789abcdef" for c in approval.claims_fingerprint)):
+                missing.append("claims_fingerprint (must be 64 lowercase hex characters)")
+            if not (approval.content_sha256 and len(approval.content_sha256) == 64 and all(c in "0123456789abcdef" for c in approval.content_sha256)):
+                missing.append("content_sha256 (must be 64 lowercase hex characters)")
             if approval.job_attempt is None or approval.job_attempt < 1:
-                missing.append("job_attempt")
+                missing.append("job_attempt (must be integer >= 1)")
             raise ValueError(
                 f"New approval record rejected: missing or incomplete binding data: {', '.join(missing)}. "
                 "New approvals must strictly bind to the exact draft and content being approved."
@@ -2730,6 +2935,36 @@ class Database:
                 raise ValueError(
                     f"Referenced draft '{approval.draft_id}' version '{approval.prompt_version}' does not exist in content_drafts."
                 )
+
+            # Enforce target job exists in jobs
+            job_row = c.execute(
+                "SELECT job_id, payload, attempts FROM jobs WHERE job_id = ?",
+                (approval.job_id,),
+            ).fetchone()
+            if job_row is None:
+                raise ValueError(
+                    f"Referenced job '{approval.job_id}' does not exist in jobs table."
+                )
+
+            # If job payload specifies draft_id, enforce exact match
+            try:
+                raw_payload = job_row["payload"]
+                if isinstance(raw_payload, str):
+                    p_data = json.loads(raw_payload) if raw_payload.strip() else {}
+                elif isinstance(raw_payload, dict):
+                    p_data = raw_payload
+                else:
+                    p_data = {}
+            except Exception:
+                p_data = {}
+
+            if "draft_id" in p_data:
+                payload_draft_id = str(p_data["draft_id"]).strip()
+                if payload_draft_id and payload_draft_id != approval.draft_id:
+                    raise ValueError(
+                        f"Job '{approval.job_id}' payload is bound to draft '{payload_draft_id}', "
+                        f"cannot approve mismatched draft '{approval.draft_id}'."
+                    )
 
             # Enforce at most one authoritative approval per job
             if approval.decision == ApprovalDecision.APPROVE:
@@ -2808,29 +3043,131 @@ class Database:
         approvals = [r for r in records if r.decision == ApprovalDecision.APPROVE]
         return approvals[0] if approvals else None
 
+    def get_quarantined_approval_records(
+        self,
+        job_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve quarantined legacy approval records for inspection and auditing."""
+        c = conn if conn is not None else self.get_connection()
+        try:
+            if job_id is not None:
+                rows = c.execute(
+                    "SELECT * FROM approval_records_quarantine WHERE job_id = ? ORDER BY quarantined_at ASC",
+                    (job_id,),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM approval_records_quarantine ORDER BY quarantined_at ASC"
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            if conn is None and self._conn_str != ":memory:":
+                c.close()
+
     def can_authorize_export(
         self,
         job_id: str,
         expected_draft_id: str,
         expected_prompt_version: str,
+        expected_attempt: int | None = None,
         expected_content_sha256: str | None = None,
         expected_claims_fingerprint: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> bool:
-        """Verify whether an authoritative approval exists and is strictly bound to the requested content.
+        """Verify whether an authoritative approval exists and strictly authorizes content export.
 
-        Returns False if no approval exists, if decision != 'APPROVE', if binding data is missing/legacy,
-        or if any binding field does not match expected values.
+        Fail-closed guarantees:
+        1. Validates authoritative approval exists (decision == 'APPROVE') and has complete binding.
+        2. Retrieves the actual draft from the database for (expected_draft_id, expected_prompt_version).
+        3. Retrieves actual claims for the draft from the database.
+        4. Recomputes canonical content_sha256 and claims_fingerprint from the database records.
+        5. Enforces that approval's content_sha256 and claims_fingerprint match the freshly computed values.
+        6. If expected_content_sha256 or expected_claims_fingerprint are provided, verifies they match.
+        7. Retrieves the job from the database, enforces job exists and matches job_id.
+        8. If job.payload contains 'draft_id', enforces that job.payload['draft_id'] == expected_draft_id.
+        9. Enforces approval.job_attempt matches job.attempts (and expected_attempt if provided).
+        10. Any missing record, mismatched field, empty string, or error immediately returns False.
         """
-        approval = self.get_authoritative_approval(job_id, conn=conn)
-        if approval is None:
+        if not job_id or not expected_draft_id or not expected_prompt_version:
             return False
-        return approval.is_valid_for_export(
-            draft_id=expected_draft_id,
-            prompt_version=expected_prompt_version,
-            content_sha256=expected_content_sha256,
-            claims_fingerprint=expected_claims_fingerprint,
-        )
+
+        c = conn if conn is not None else self.get_connection()
+        try:
+            # 1. Fetch authoritative approval
+            approval = self.get_authoritative_approval(job_id, conn=c)
+            if approval is None or approval.decision != ApprovalDecision.APPROVE:
+                return False
+            if not approval.has_complete_binding:
+                return False
+            if approval.draft_id != expected_draft_id:
+                return False
+            if approval.prompt_version != expected_prompt_version:
+                return False
+
+            # 2. Fetch the draft from database
+            draft = self.get_draft(expected_draft_id, expected_prompt_version, conn=c)
+            if draft is None:
+                return False
+            if draft.prompt_version != expected_prompt_version or draft.id != expected_draft_id:
+                return False
+
+            # 3. Fetch claims for this draft from database
+            claims = self.get_claims_for_draft(expected_draft_id, expected_prompt_version, conn=c)
+
+            # 4. Recompute canonical content_sha256 and claims_fingerprint
+            actual_content_sha = compute_content_sha256(draft)
+            actual_claims_fp = compute_claims_fingerprint(claims)
+
+            # 5. Verify approval record matches freshly recomputed canonical hashes
+            if approval.content_sha256 != actual_content_sha:
+                return False
+            if approval.claims_fingerprint != actual_claims_fp:
+                return False
+
+            # 6. Verify optional caller-supplied hashes if passed
+            if expected_content_sha256 is not None:
+                if expected_content_sha256.strip().lower() != actual_content_sha:
+                    return False
+            if expected_claims_fingerprint is not None:
+                if expected_claims_fingerprint.strip().lower() != actual_claims_fp:
+                    return False
+
+            # 7. Fetch the job from database
+            job = self.get_job(job_id, conn=c)
+            if job is None:
+                return False
+
+            # 8. Check job payload draft_id binding
+            try:
+                if isinstance(job.payload, str):
+                    payload_data = json.loads(job.payload) if job.payload.strip() else {}
+                elif isinstance(job.payload, dict):
+                    payload_data = job.payload
+                else:
+                    payload_data = {}
+            except Exception:
+                payload_data = {}
+
+            if "draft_id" in payload_data:
+                payload_draft_id = str(payload_data["draft_id"]).strip()
+                if payload_draft_id and payload_draft_id != expected_draft_id:
+                    return False
+
+            # 9. Enforce job attempt consistency
+            if expected_attempt is not None:
+                if approval.job_attempt != expected_attempt:
+                    return False
+            # Check against job's current attempt counter
+            if approval.job_attempt != job.attempts:
+                return False
+
+            return True
+        except Exception:
+            return False
+        finally:
+            if conn is None and self._conn_str != ":memory:":
+                c.close()
 
     def create_safe_database_backup(
         self,

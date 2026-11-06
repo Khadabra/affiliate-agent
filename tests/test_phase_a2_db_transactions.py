@@ -35,6 +35,8 @@ from affiliate_factory.db import (
     JobStatus,
     TransactionScope,
     TransactionScopeError,
+    compute_claims_fingerprint,
+    compute_content_sha256,
     create_safe_database_backup,
 )
 from affiliate_factory.models import ContentDraft, Product
@@ -636,6 +638,8 @@ class TestPersistentJobQueue(unittest.TestCase):
         ))
         job = self.db.submit_job("content_pipeline", {"draft_id": "draft_appr"})
         now_iso = datetime.now(timezone.utc).isoformat()
+        content_sha = compute_content_sha256(self.db.get_draft("draft_appr", "v1.0"))
+        claims_fp = compute_claims_fingerprint(["Claim 1"])
         approval = ApprovalRecord(
             approval_id="appr_1",
             job_id=job.job_id,
@@ -645,8 +649,8 @@ class TestPersistentJobQueue(unittest.TestCase):
             reviewed_at=now_iso,
             draft_id="draft_appr",
             prompt_version="v1.0",
-            claims_fingerprint="claims_fp_sample",
-            content_sha256="content_sha_sample",
+            claims_fingerprint=claims_fp,
+            content_sha256=content_sha,
             job_attempt=1,
         )
         self.db.save_approval_record(approval)
@@ -658,8 +662,8 @@ class TestPersistentJobQueue(unittest.TestCase):
         self.assertEqual(records[0].reviewer, "human_editor_1")
         self.assertEqual(records[0].draft_id, "draft_appr")
         self.assertEqual(records[0].prompt_version, "v1.0")
-        self.assertEqual(records[0].content_sha256, "content_sha_sample")
-        self.assertEqual(records[0].claims_fingerprint, "claims_fp_sample")
+        self.assertEqual(records[0].content_sha256, content_sha)
+        self.assertEqual(records[0].claims_fingerprint, claims_fp)
         self.assertEqual(records[0].job_attempt, 1)
 
 
