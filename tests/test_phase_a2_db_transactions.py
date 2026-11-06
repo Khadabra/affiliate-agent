@@ -621,7 +621,20 @@ class TestPersistentJobQueue(unittest.TestCase):
 
     def test_approval_records(self) -> None:
         """Approval and rejection records can be saved and retrieved in chronological order."""
-        job = self.db.submit_job("content_pipeline", {})
+        self.db.insert_product(Product(id="p_appr", name="Prod Appr", url="https://shopee.co.id/appr", source="manual"))
+        self.db.upsert_draft(ContentDraft(
+            id="draft_appr",
+            product_id="p_appr",
+            angle="angle",
+            hook="hook",
+            script="script",
+            caption="caption",
+            cta="cta",
+            disclosure_text="#ShopeeAffiliate",
+            status="waiting_approval",
+            prompt_version="v1.0",
+        ))
+        job = self.db.submit_job("content_pipeline", {"draft_id": "draft_appr"})
         now_iso = datetime.now(timezone.utc).isoformat()
         approval = ApprovalRecord(
             approval_id="appr_1",
@@ -630,14 +643,24 @@ class TestPersistentJobQueue(unittest.TestCase):
             reviewer="human_editor_1",
             notes="Passed fact checking and quality gate",
             reviewed_at=now_iso,
+            draft_id="draft_appr",
+            prompt_version="v1.0",
+            claims_fingerprint="claims_fp_sample",
+            content_sha256="content_sha_sample",
+            job_attempt=1,
         )
         self.db.save_approval_record(approval)
 
         records = self.db.get_approval_records(job.job_id)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].approval_id, "appr_1")
-        self.assertEqual(records[0].decision, "approved")
+        self.assertEqual(records[0].decision, "APPROVE")
         self.assertEqual(records[0].reviewer, "human_editor_1")
+        self.assertEqual(records[0].draft_id, "draft_appr")
+        self.assertEqual(records[0].prompt_version, "v1.0")
+        self.assertEqual(records[0].content_sha256, "content_sha_sample")
+        self.assertEqual(records[0].claims_fingerprint, "claims_fp_sample")
+        self.assertEqual(records[0].job_attempt, 1)
 
 
 class TestMigrationValidation(unittest.TestCase):

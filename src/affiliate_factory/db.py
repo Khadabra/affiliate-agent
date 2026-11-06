@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -10,7 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from affiliate_factory.models import (
     Claim,
@@ -94,6 +95,14 @@ class JobRunRecord(BaseModel):
     error_message: str | None = None
 
 
+CURRENT_SCHEMA_VERSION: int = 2
+
+
+class ApprovalDecision(StrEnum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+
 class ApprovalRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -103,6 +112,85 @@ class ApprovalRecord(BaseModel):
     reviewer: str
     notes: str | None = None
     reviewed_at: str
+    draft_id: str | None = None
+    prompt_version: str | None = None
+    claims_fingerprint: str | None = None
+    content_sha256: str | None = None
+    job_attempt: int | None = None
+
+    @field_validator("decision")
+    @classmethod
+    def validate_decision(cls, v: str) -> str:
+        upper = v.upper()
+        if upper == "APPROVED":
+            upper = "APPROVE"
+        elif upper == "REJECTED":
+            upper = "REJECT"
+        if upper not in (ApprovalDecision.APPROVE, ApprovalDecision.REJECT):
+            raise ValueError(f"Invalid approval decision '{v}'. Decision must be 'APPROVE' or 'REJECT'.")
+        return upper
+
+    @property
+    def has_complete_binding(self) -> bool:
+        """Return True only if all 5 binding fields are present and valid."""
+        return (
+            bool(self.draft_id and str(self.draft_id).strip())
+            and bool(self.prompt_version and str(self.prompt_version).strip())
+            and bool(self.claims_fingerprint and str(self.claims_fingerprint).strip())
+            and bool(self.content_sha256 and str(self.content_sha256).strip())
+            and (self.job_attempt is not None and self.job_attempt >= 1)
+        )
+
+    def is_valid_for_export(
+        self,
+        draft_id: str | None = None,
+        prompt_version: str | None = None,
+        content_sha256: str | None = None,
+        claims_fingerprint: str | None = None,
+    ) -> bool:
+        """Check if this approval is authoritative and strictly bound to the requested content.
+
+        Legacy unbound approvals or approvals missing any binding data always return False.
+        """
+        if self.decision != ApprovalDecision.APPROVE:
+            return False
+        if not self.has_complete_binding:
+            return False
+        if draft_id is not None and self.draft_id != draft_id:
+            return False
+        if prompt_version is not None and self.prompt_version != prompt_version:
+            return False
+        if content_sha256 is not None and self.content_sha256 != content_sha256:
+            return False
+        if claims_fingerprint is not None and self.claims_fingerprint != claims_fingerprint:
+            return False
+        return True
+
+
+def compute_content_sha256(content: str | bytes | ContentDraft) -> str:
+    """Compute deterministic SHA-256 hex digest for content or ContentDraft."""
+    if isinstance(content, ContentDraft):
+        raw = f"{content.hook}\n{content.script}\n{content.caption}\n{content.cta}\n{content.disclosure_text}".encode("utf-8")
+    elif isinstance(content, str):
+        raw = content.encode("utf-8")
+    else:
+        raw = content
+    return hashlib.sha256(raw).hexdigest()
+
+
+def compute_claims_fingerprint(claims: list[Claim] | list[dict[str, Any]] | list[str]) -> str:
+    """Compute deterministic SHA-256 fingerprint for a list of claims."""
+    serialized: list[str] = []
+    for c in claims:
+        if isinstance(c, Claim):
+            serialized.append(f"{c.id}:{c.text}:{c.verification_status}:{c.source_ref or ''}")
+        elif isinstance(c, dict):
+            serialized.append(f"{c.get('id', '')}:{c.get('text', '')}:{c.get('verification_status', '')}:{c.get('source_ref') or ''}")
+        else:
+            serialized.append(str(c))
+    serialized.sort()
+    raw = "\n".join(serialized).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 class TransactionScope:
@@ -234,14 +322,45 @@ class Database:
                 conn.close()
 
     def init_schema(self) -> None:
-        """Create all required tables with appropriate constraints."""
+        """Create all required tables with appropriate constraints atomically."""
         conn = self.get_connection()
         try:
             if self._conn_str != ":memory:":
                 conn.execute("PRAGMA journal_mode = WAL")
-            with conn:
-                # 1. Base entities (products, content_drafts) must exist first for foreign keys
-                conn.executescript(
+
+            current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current_version > CURRENT_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema version {current_version} is newer than supported version {CURRENT_SCHEMA_VERSION}."
+                )
+
+            # Check if database is already fully migrated
+            if current_version == CURRENT_SCHEMA_VERSION:
+                fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if fk_violations:
+                    details = [
+                        f"table={row[0]}, rowid={row[1]}, parent={row[2]}, fkid={row[3]}"
+                        for row in fk_violations
+                    ]
+                    raise RuntimeError(
+                        f"Database schema initialization/migration failed foreign key validation: {', '.join(details)}"
+                    )
+                return
+
+            # Pre-migration backup for existing non-empty on-disk databases
+            if isinstance(self.db_path, Path) and self.db_path.exists() and self.db_path.stat().st_size > 0:
+                backup_dir = self.db_path.parent / ".backups"
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                backup_name = f"{self.db_path.stem}_pre_migration_v{current_version}_{ts}.db"
+                try:
+                    self.create_safe_database_backup(backup_dir, backup_name=backup_name)
+                except Exception:
+                    pass
+
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # 1. Base entities (products, content_drafts)
+                conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS products (
                         id TEXT PRIMARY KEY,
@@ -251,8 +370,11 @@ class Database:
                         price_observed_at TEXT,
                         source TEXT NOT NULL,
                         notes TEXT
-                    );
-
+                    )
+                    """
+                )
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS content_drafts (
                         id TEXT NOT NULL,
                         product_id TEXT NOT NULL,
@@ -267,12 +389,14 @@ class Database:
                         created_at TEXT NOT NULL,
                         PRIMARY KEY (id, prompt_version),
                         FOREIGN KEY (product_id) REFERENCES products (id)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_content_drafts_product ON content_drafts (product_id);
+                    )
                     """
                 )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_content_drafts_product ON content_drafts (product_id)"
+                )
 
-                                # 2. Transparent migration & orphan preservation for compliance_reports
+                # 2. Transparent migration & orphan preservation for compliance_reports
                 table_check = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='compliance_reports'"
                 ).fetchone()
@@ -286,7 +410,6 @@ class Database:
                     has_pv = "prompt_version" in cols
 
                     if not (has_fk and has_pv):
-                        # Detect orphans before migrating to preserve data and satisfy foreign keys
                         if not has_pv:
                             orphans = conn.execute(
                                 """
@@ -340,7 +463,7 @@ class Database:
                                     (d_id, p_ver, now_iso),
                                 )
 
-                        conn.executescript(
+                        conn.execute(
                             """
                             CREATE TABLE compliance_reports_v2 (
                                 draft_id TEXT NOT NULL,
@@ -349,7 +472,7 @@ class Database:
                                 findings_json TEXT NOT NULL,
                                 PRIMARY KEY (draft_id, prompt_version),
                                 FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
-                            );
+                            )
                             """
                         )
                         if not has_pv:
@@ -366,12 +489,8 @@ class Database:
                                 SELECT draft_id, prompt_version, passed, findings_json FROM compliance_reports
                                 """
                             )
-                        conn.executescript(
-                            """
-                            DROP TABLE compliance_reports;
-                            ALTER TABLE compliance_reports_v2 RENAME TO compliance_reports;
-                            """
-                        )
+                        conn.execute("DROP TABLE compliance_reports")
+                        conn.execute("ALTER TABLE compliance_reports_v2 RENAME TO compliance_reports")
 
                 # 3. Transparent migration & orphan preservation for claims
                 table_check_claims = conn.execute(
@@ -391,7 +510,6 @@ class Database:
                             conn.execute("ALTER TABLE claims ADD COLUMN prompt_version TEXT")
                             claim_cols.add("prompt_version")
 
-                        # Migrate existing claims: associate if exactly 1 distinct version exists in content_drafts
                         draft_ids = [
                             row["draft_id"]
                             for row in conn.execute("SELECT DISTINCT draft_id FROM claims").fetchall()
@@ -408,7 +526,6 @@ class Database:
                                     (single_pv, d_id),
                                 )
 
-                        # Detect orphaned claims that have a non-null prompt_version before applying foreign key constraint
                         orphaned_claims = conn.execute(
                             """
                             SELECT DISTINCT c.draft_id, c.prompt_version
@@ -451,7 +568,7 @@ class Database:
                                     (d_id, p_ver, now_iso),
                                 )
 
-                        conn.executescript(
+                        conn.execute(
                             """
                             CREATE TABLE claims_v2 (
                                 id TEXT PRIMARY KEY,
@@ -461,15 +578,22 @@ class Database:
                                 source_ref TEXT,
                                 verification_status TEXT NOT NULL,
                                 FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
-                            );
-                            INSERT INTO claims_v2 (id, draft_id, prompt_version, text, source_ref, verification_status)
-                            SELECT id, draft_id, prompt_version, text, source_ref, verification_status FROM claims;
-                            DROP TABLE claims;
-                            ALTER TABLE claims_v2 RENAME TO claims;
-                            CREATE INDEX IF NOT EXISTS idx_claims_draft_version ON claims (draft_id, prompt_version);
+                            )
                             """
                         )
+                        conn.execute(
+                            """
+                            INSERT INTO claims_v2 (id, draft_id, prompt_version, text, source_ref, verification_status)
+                            SELECT id, draft_id, prompt_version, text, source_ref, verification_status FROM claims
+                            """
+                        )
+                        conn.execute("DROP TABLE claims")
+                        conn.execute("ALTER TABLE claims_v2 RENAME TO claims")
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_claims_draft_version ON claims (draft_id, prompt_version)"
+                        )
 
+                # 4. workflow_executions check
                 workflow_table_check = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_executions'"
                 ).fetchone()
@@ -483,7 +607,74 @@ class Database:
                             "ALTER TABLE workflow_executions ADD COLUMN workflow_json TEXT NOT NULL DEFAULT '{}'"
                         )
 
-                conn.executescript(
+                # 5. approval_records migration
+                table_check_approvals = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='approval_records'"
+                ).fetchone()
+                if table_check_approvals:
+                    appr_cols = {
+                        row["name"]
+                        for row in conn.execute("PRAGMA table_info(approval_records)").fetchall()
+                    }
+                    if "draft_id" not in appr_cols:
+                        conn.execute(
+                            """
+                            CREATE TABLE approval_records_v2 (
+                                approval_id TEXT PRIMARY KEY,
+                                job_id TEXT NOT NULL,
+                                decision TEXT NOT NULL CHECK (decision IN ('APPROVE', 'REJECT')),
+                                reviewer TEXT NOT NULL,
+                                notes TEXT,
+                                reviewed_at TEXT NOT NULL,
+                                draft_id TEXT,
+                                prompt_version TEXT,
+                                claims_fingerprint TEXT,
+                                content_sha256 TEXT,
+                                job_attempt INTEGER,
+                                FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE,
+                                FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
+                            )
+                            """
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO approval_records_v2 (
+                                approval_id, job_id, decision, reviewer, notes, reviewed_at,
+                                draft_id, prompt_version, claims_fingerprint, content_sha256, job_attempt
+                            )
+                            SELECT
+                                approval_id,
+                                job_id,
+                                CASE
+                                    WHEN UPPER(decision) = 'APPROVED' THEN 'APPROVE'
+                                    WHEN UPPER(decision) = 'REJECTED' THEN 'REJECT'
+                                    ELSE UPPER(decision)
+                                END,
+                                reviewer,
+                                notes,
+                                reviewed_at,
+                                NULL, NULL, NULL, NULL, NULL
+                            FROM approval_records
+                            """
+                        )
+                        conn.execute("DROP TABLE approval_records")
+                        conn.execute("ALTER TABLE approval_records_v2 RENAME TO approval_records")
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_approval_records_job ON approval_records (job_id)"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_approval_records_draft ON approval_records (draft_id, prompt_version)"
+                        )
+                        conn.execute(
+                            """
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_records_authoritative_unique
+                                ON approval_records (job_id)
+                                WHERE decision = 'APPROVE'
+                            """
+                        )
+
+                # 6. Ensure all required tables and indexes exist
+                conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS products (
                         id TEXT PRIMARY KEY,
@@ -493,8 +684,11 @@ class Database:
                         price_observed_at TEXT,
                         source TEXT NOT NULL,
                         notes TEXT
-                    );
-
+                    )
+                    """
+                )
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS content_drafts (
                         id TEXT NOT NULL,
                         product_id TEXT NOT NULL,
@@ -509,9 +703,13 @@ class Database:
                         created_at TEXT NOT NULL,
                         PRIMARY KEY (id, prompt_version),
                         FOREIGN KEY (product_id) REFERENCES products (id)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_content_drafts_product ON content_drafts (product_id);
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_content_drafts_product ON content_drafts (product_id)")
 
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS claims (
                         id TEXT PRIMARY KEY,
                         draft_id TEXT NOT NULL,
@@ -520,9 +718,13 @@ class Database:
                         source_ref TEXT,
                         verification_status TEXT NOT NULL,
                         FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_claims_draft_version ON claims (draft_id, prompt_version);
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_draft_version ON claims (draft_id, prompt_version)")
 
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS compliance_reports (
                         draft_id TEXT NOT NULL,
                         prompt_version TEXT NOT NULL DEFAULT 'v1.0',
@@ -530,8 +732,12 @@ class Database:
                         findings_json TEXT NOT NULL,
                         PRIMARY KEY (draft_id, prompt_version),
                         FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
-                    );
+                    )
+                    """
+                )
 
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS performance_records (
                         id TEXT PRIMARY KEY,
                         content_id TEXT NOT NULL,
@@ -542,9 +748,13 @@ class Database:
                         orders INTEGER,
                         commission_idr REAL,
                         data_source TEXT NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_perf_content_platform ON performance_records (content_id, platform, observed_at);
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_perf_content_platform ON performance_records (content_id, platform, observed_at)")
 
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS events (
                         id TEXT PRIMARY KEY,
                         ts TEXT NOT NULL,
@@ -555,10 +765,14 @@ class Database:
                         ref_type TEXT NOT NULL,
                         ref_id TEXT NOT NULL,
                         note TEXT
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_events_run_id ON events (run_id);
-                    CREATE INDEX IF NOT EXISTS idx_events_ref ON events (ref_id, module, action);
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_id ON events (run_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ref ON events (ref_id, module, action)")
 
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS agent_tasks (
                         task_id TEXT PRIMARY KEY,
                         agent_id TEXT NOT NULL,
@@ -573,11 +787,13 @@ class Database:
                         output_json TEXT NOT NULL DEFAULT '{}',
                         error_json TEXT,
                         execution_metadata_json TEXT NOT NULL DEFAULT '{}'
-                    );
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_tasks_correlation ON agent_tasks (correlation_id)")
 
-                    CREATE INDEX IF NOT EXISTS idx_agent_tasks_correlation
-                        ON agent_tasks (correlation_id);
-
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS agent_events (
                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                         event_id TEXT NOT NULL UNIQUE,
@@ -588,11 +804,13 @@ class Database:
                         payload_json TEXT NOT NULL,
                         correlation_id TEXT NOT NULL,
                         FOREIGN KEY (task_id) REFERENCES agent_tasks (task_id)
-                    );
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_events_task ON agent_events (task_id, sequence)")
 
-                    CREATE INDEX IF NOT EXISTS idx_agent_events_task
-                        ON agent_events (task_id, sequence);
-
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS workflow_executions (
                         execution_id TEXT PRIMARY KEY,
                         workflow_id TEXT NOT NULL,
@@ -608,11 +826,13 @@ class Database:
                         workflow_json TEXT NOT NULL DEFAULT '{}',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
-                    );
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_executions_correlation ON workflow_executions (correlation_id)")
 
-                    CREATE INDEX IF NOT EXISTS idx_workflow_executions_correlation
-                        ON workflow_executions (correlation_id);
-
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS workflow_steps (
                         execution_id TEXT NOT NULL,
                         step_id TEXT NOT NULL,
@@ -625,8 +845,12 @@ class Database:
                         updated_at TEXT NOT NULL,
                         PRIMARY KEY (execution_id, step_id),
                         FOREIGN KEY (execution_id) REFERENCES workflow_executions (execution_id)
-                    );
+                    )
+                    """
+                )
 
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS workflow_events (
                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                         event_id TEXT NOT NULL UNIQUE,
@@ -639,11 +863,13 @@ class Database:
                         payload_json TEXT NOT NULL,
                         correlation_id TEXT NOT NULL,
                         FOREIGN KEY (execution_id) REFERENCES workflow_executions (execution_id)
-                    );
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_workflow_events_execution ON workflow_events (execution_id, sequence)")
 
-                    CREATE INDEX IF NOT EXISTS idx_workflow_events_execution
-                        ON workflow_events (execution_id, sequence);
-
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS jobs (
                         job_id TEXT PRIMARY KEY,
                         job_type TEXT NOT NULL,
@@ -663,20 +889,15 @@ class Database:
                         completed_at TEXT,
                         error_message TEXT,
                         result_payload TEXT
-                    );
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_claim_candidate ON jobs (status, priority, created_at) WHERE status = 'queued'")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_stale_recovery ON jobs (status, lease_expires_at) WHERE status = 'running'")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_idempotency ON jobs (idempotency_key) WHERE idempotency_key IS NOT NULL")
 
-                    CREATE INDEX IF NOT EXISTS idx_jobs_claim_candidate
-                        ON jobs (status, priority, created_at)
-                        WHERE status = 'queued';
-
-                    CREATE INDEX IF NOT EXISTS idx_jobs_stale_recovery
-                        ON jobs (status, lease_expires_at)
-                        WHERE status = 'running';
-
-                    CREATE INDEX IF NOT EXISTS idx_jobs_idempotency
-                        ON jobs (idempotency_key)
-                        WHERE idempotency_key IS NOT NULL;
-
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS job_runs (
                         run_id TEXT PRIMARY KEY,
                         job_id TEXT NOT NULL,
@@ -687,25 +908,41 @@ class Database:
                         final_status TEXT,
                         error_message TEXT,
                         FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE
-                    );
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs (job_id, attempt_number)")
 
-                    CREATE INDEX IF NOT EXISTS idx_job_runs_job
-                        ON job_runs (job_id, attempt_number);
-
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS approval_records (
                         approval_id TEXT PRIMARY KEY,
                         job_id TEXT NOT NULL,
-                        decision TEXT NOT NULL,
+                        decision TEXT NOT NULL CHECK (decision IN ('APPROVE', 'REJECT')),
                         reviewer TEXT NOT NULL,
                         notes TEXT,
                         reviewed_at TEXT NOT NULL,
-                        FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_approval_records_job
-                        ON approval_records (job_id);
+                        draft_id TEXT,
+                        prompt_version TEXT,
+                        claims_fingerprint TEXT,
+                        content_sha256 TEXT,
+                        job_attempt INTEGER,
+                        FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE,
+                        FOREIGN KEY (draft_id, prompt_version) REFERENCES content_drafts (id, prompt_version) ON DELETE CASCADE
+                    )
                     """
                 )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_approval_records_job ON approval_records (job_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_approval_records_draft ON approval_records (draft_id, prompt_version)")
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_records_authoritative_unique
+                        ON approval_records (job_id)
+                        WHERE decision = 'APPROVE'
+                    """
+                )
+
+                # 7. PRAGMA foreign_key_check before commit
                 fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
                 if fk_violations:
                     details = [
@@ -715,10 +952,16 @@ class Database:
                     raise RuntimeError(
                         f"Database schema initialization/migration failed foreign key validation: {', '.join(details)}"
                     )
+
+                # 8. Set user_version to CURRENT_SCHEMA_VERSION and commit
+                conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             if self._conn_str != ":memory:":
                 conn.close()
-
     # --- Product Operations ---
     def insert_product(self, product: Product, conn: sqlite3.Connection | None = None) -> bool:
         """Insert a product. Returns True if inserted, False if URL already exists."""
@@ -2454,13 +2697,57 @@ class Database:
         approval: ApprovalRecord,
         conn: sqlite3.Connection | None = None,
     ) -> None:
-        """Persist human approval or rejection record."""
+        """Persist human approval or rejection record with strict binding validation."""
+        if approval.decision not in (ApprovalDecision.APPROVE, ApprovalDecision.REJECT):
+            raise ValueError(
+                f"Invalid approval decision '{approval.decision}'. Decision must be 'APPROVE' or 'REJECT'."
+            )
+
+        if not approval.has_complete_binding:
+            missing: list[str] = []
+            if not (approval.draft_id and str(approval.draft_id).strip()):
+                missing.append("draft_id")
+            if not (approval.prompt_version and str(approval.prompt_version).strip()):
+                missing.append("prompt_version")
+            if not (approval.claims_fingerprint and str(approval.claims_fingerprint).strip()):
+                missing.append("claims_fingerprint")
+            if not (approval.content_sha256 and str(approval.content_sha256).strip()):
+                missing.append("content_sha256")
+            if approval.job_attempt is None or approval.job_attempt < 1:
+                missing.append("job_attempt")
+            raise ValueError(
+                f"New approval record rejected: missing or incomplete binding data: {', '.join(missing)}. "
+                "New approvals must strictly bind to the exact draft and content being approved."
+            )
+
         with TransactionScope(self, conn) as c:
+            # Enforce target draft exists in content_drafts
+            draft_row = c.execute(
+                "SELECT id FROM content_drafts WHERE id = ? AND prompt_version = ?",
+                (approval.draft_id, approval.prompt_version),
+            ).fetchone()
+            if draft_row is None:
+                raise ValueError(
+                    f"Referenced draft '{approval.draft_id}' version '{approval.prompt_version}' does not exist in content_drafts."
+                )
+
+            # Enforce at most one authoritative approval per job
+            if approval.decision == ApprovalDecision.APPROVE:
+                existing_approve = c.execute(
+                    "SELECT approval_id FROM approval_records WHERE job_id = ? AND decision = 'APPROVE'",
+                    (approval.job_id,),
+                ).fetchone()
+                if existing_approve is not None:
+                    raise ValueError(
+                        f"Duplicate authoritative approval rejected: job '{approval.job_id}' already has an approved record '{existing_approve['approval_id']}'."
+                    )
+
             c.execute(
                 """
                 INSERT INTO approval_records (
-                    approval_id, job_id, decision, reviewer, notes, reviewed_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    approval_id, job_id, decision, reviewer, notes, reviewed_at,
+                    draft_id, prompt_version, claims_fingerprint, content_sha256, job_attempt
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval.approval_id,
@@ -2469,6 +2756,11 @@ class Database:
                     approval.reviewer,
                     approval.notes,
                     approval.reviewed_at,
+                    approval.draft_id,
+                    approval.prompt_version,
+                    approval.claims_fingerprint,
+                    approval.content_sha256,
+                    approval.job_attempt,
                 ),
             )
 
@@ -2483,20 +2775,62 @@ class Database:
                 "SELECT * FROM approval_records WHERE job_id = ? ORDER BY reviewed_at ASC",
                 (job_id,),
             ).fetchall()
-            return [
-                ApprovalRecord(
-                    approval_id=r["approval_id"],
-                    job_id=r["job_id"],
-                    decision=r["decision"],
-                    reviewer=r["reviewer"],
-                    notes=r["notes"],
-                    reviewed_at=r["reviewed_at"],
+            records: list[ApprovalRecord] = []
+            for r in rows:
+                col_keys = r.keys() if hasattr(r, "keys") else []
+                records.append(
+                    ApprovalRecord(
+                        approval_id=r["approval_id"],
+                        job_id=r["job_id"],
+                        decision=r["decision"],
+                        reviewer=r["reviewer"],
+                        notes=r["notes"],
+                        reviewed_at=r["reviewed_at"],
+                        draft_id=r["draft_id"] if "draft_id" in col_keys else None,
+                        prompt_version=r["prompt_version"] if "prompt_version" in col_keys else None,
+                        claims_fingerprint=r["claims_fingerprint"] if "claims_fingerprint" in col_keys else None,
+                        content_sha256=r["content_sha256"] if "content_sha256" in col_keys else None,
+                        job_attempt=r["job_attempt"] if "job_attempt" in col_keys else None,
+                    )
                 )
-                for r in rows
-            ]
+            return records
         finally:
             if conn is None and self._conn_str != ":memory:":
                 c.close()
+
+    def get_authoritative_approval(
+        self,
+        job_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> ApprovalRecord | None:
+        """Return the authoritative approval (decision == 'APPROVE') for a job, if one exists."""
+        records = self.get_approval_records(job_id, conn=conn)
+        approvals = [r for r in records if r.decision == ApprovalDecision.APPROVE]
+        return approvals[0] if approvals else None
+
+    def can_authorize_export(
+        self,
+        job_id: str,
+        expected_draft_id: str,
+        expected_prompt_version: str,
+        expected_content_sha256: str | None = None,
+        expected_claims_fingerprint: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        """Verify whether an authoritative approval exists and is strictly bound to the requested content.
+
+        Returns False if no approval exists, if decision != 'APPROVE', if binding data is missing/legacy,
+        or if any binding field does not match expected values.
+        """
+        approval = self.get_authoritative_approval(job_id, conn=conn)
+        if approval is None:
+            return False
+        return approval.is_valid_for_export(
+            draft_id=expected_draft_id,
+            prompt_version=expected_prompt_version,
+            content_sha256=expected_content_sha256,
+            claims_fingerprint=expected_claims_fingerprint,
+        )
 
     def create_safe_database_backup(
         self,
